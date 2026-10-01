@@ -3,6 +3,7 @@ use tokio::sync::mpsc;
 use tracing::{info, warn};
 
 use crate::db::Database;
+use crate::mesh::models::EventCalendarItem;
 use crate::mesh::MeshClient;
 use crate::telegram::client::TelegramClient;
 
@@ -27,6 +28,7 @@ pub struct BotHandler {
     db: Database,
     admin_ids: Vec<i64>,
     event_tx: mpsc::Sender<BotCommandEvent>,
+    solver: crate::solver::SolverRunner,
 }
 
 impl BotHandler {
@@ -36,6 +38,7 @@ impl BotHandler {
         db: Database,
         admin_ids: Vec<i64>,
         event_tx: mpsc::Sender<BotCommandEvent>,
+        solver: crate::solver::SolverRunner,
     ) -> Self {
         Self {
             tg,
@@ -43,6 +46,7 @@ impl BotHandler {
             db,
             admin_ids,
             event_tx,
+            solver,
         }
     }
 
@@ -71,6 +75,8 @@ impl BotHandler {
 
                                 if text.starts_with('/') {
                                     self.handle_command(&chat_id, &text, from_username, from_id, is_admin).await;
+                                } else if text.starts_with('!') {
+                                    self.handle_chat_query(&chat_id, &text).await;
                                 }
                             }
                         }
@@ -103,6 +109,7 @@ impl BotHandler {
             "/start" | "/help" | "/start@ew1484_bot" | "/help@ew1484_bot" => {
                 let msg = "Бот автоматического решения домашних заданий МЭШ.\n\n\
                 Доступные команды:\n\
+                ! <вопрос> - задать вопрос нейросети (объяснить ДЗ, разобрать тему, доступно всем)\n\
                 /dz - решение ДЗ на завтра (только @ametist1337)\n\
                 /dz <день недели> - решение на любой день (пн, вт, ср, чт, пт, сб, вс)\n\
                 /dz сегодня - решение заданий на сегодня\n\
@@ -212,8 +219,141 @@ impl BotHandler {
                 let _ = self.db.set_setting("mesh_token", &new_token);
                 let _ = self.tg.send_message(chat_id, "МЭШ токен успешно обновлен и сохранен в базе данных.").await;
             }
+            "/schedule" | "/schedule@ew1484_bot" | "/расписание" | "/расписание@ew1484_bot" | "/lessons" | "/звонки" => {
+                let today = chrono::Local::now().date_naive();
+                let day_arg = parts.iter().skip(1).next().copied();
+                let (target, _name) = if let Some(arg) = day_arg {
+                    parse_target_day_input(arg, today)
+                } else {
+                    let hour = chrono::Local::now().hour();
+                    if hour >= 15 {
+                        (TargetDay::Tomorrow, "завтра".to_string())
+                    } else {
+                        (TargetDay::Today, "сегодня".to_string())
+                    }
+                };
+
+                let target_date = match target {
+                    TargetDay::Today => today,
+                    TargetDay::Tomorrow => today + chrono::Duration::days(1),
+                    TargetDay::Specific(d) => d,
+                };
+
+                let mesh_client = self.mesh.clone();
+                let tg_client = self.tg.clone();
+                let chat_id_str = chat_id.to_string();
+
+                tokio::spawn(async move {
+                    match mesh_client.get_events(target_date, target_date).await {
+                        Ok(events) => {
+                            let text = format_day_schedule_telegram(target_date, &events);
+                            let _ = tg_client.send_message(&chat_id_str, &text).await;
+                        }
+                        Err(e) => {
+                            let _ = tg_client.send_message(&chat_id_str, &format!("Ошибка получения расписания: {}", e)).await;
+                        }
+                    }
+                });
+            }
             _ => {}
         }
+    }
+
+    async fn handle_chat_query(&self, chat_id: &str, raw_text: &str) {
+        let query = raw_text.trim_start_matches('!').trim();
+        if query.is_empty() {
+            return;
+        }
+
+        info!("Получен запрос к AI чату: '{}'", query);
+
+        let today = chrono::Local::now().date_naive();
+        let from_date = today - chrono::Duration::days(14);
+        let to_date = today + chrono::Duration::days(14);
+
+        let mesh_client = self.mesh.clone();
+        // Параллельно запрашиваем живые домашние задания и события календаря (расписание с таймингами)
+        let (live_hws_res, events_res) = tokio::join!(
+            mesh_client.get_homeworks(from_date, to_date),
+            mesh_client.get_events(from_date, to_date)
+        );
+
+        let live_hws = live_hws_res.unwrap_or_default();
+        let events = events_res.unwrap_or_default();
+
+        let schedule_context = format_schedule_context(&events);
+
+        let mut mesh_context = String::new();
+        if !live_hws.is_empty() {
+            mesh_context.push_str(&format!(
+                "АКТУАЛЬНЫЕ ДОМАШНИЕ ЗАДАНИЯ ИЗ МЭШ (СЕГОДНЯ: {}, диапазон {} — {}):\n",
+                today.format("%d.%m.%Y"),
+                from_date.format("%d.%m.%Y"),
+                to_date.format("%d.%m.%Y")
+            ));
+            for hw in &live_hws {
+                let sub = hw.subject_name.as_deref().unwrap_or("Предмет");
+                let date = hw.date.as_deref().or(hw.lesson_date_time.as_deref()).unwrap_or("—");
+                let desc = hw.description.as_deref().unwrap_or("").trim();
+                let is_done_str = if hw.is_done.unwrap_or(false) { " (выполнено)" } else { "" };
+                mesh_context.push_str(&format!("• [{}] {}{}: {}\n", date, sub, is_done_str, desc));
+            }
+            mesh_context.push('\n');
+        }
+
+        // 2. Получаем готовые решения из локальной базы данных
+        let recent_solutions = self.db.get_recent_solutions(15).unwrap_or_default();
+        let mut solutions_context = String::new();
+        if !recent_solutions.is_empty() {
+            solutions_context.push_str("БАЗА ГОТОВЫХ РЕШЕНИЙ ДОМАШНИХ ЗАДАНИЙ:\n");
+            for (sub, date, desc, sol) in recent_solutions {
+                solutions_context.push_str(&format!("--- ПРЕДМЕТ: {} (Срок: {}) ---\n", sub, date));
+                if !desc.trim().is_empty() {
+                    solutions_context.push_str(&format!("Задание: {}\n", desc.trim()));
+                }
+                let short_sol: String = sol.chars().take(900).collect();
+                solutions_context.push_str(&format!("Решение:\n{}\n\n", short_sol));
+            }
+        }
+
+        let prompt = format!(
+            "Ты — дружелюбный, умный школьный помощник и репетитор для учеников 7 класса.\n\
+             Тебе задали вопрос в Telegram-чате класса.\n\n\
+             {}\n\
+             {}\n\
+             {}\n\
+             ВОПРОС ПОЛЬЗОВАТЕЛЯ:\n\
+             \"\"\"\n{}\n\"\"\"\n\n\
+             ПРАВИЛА ОТВЕТА:\n\
+             1. В твоем распоряжении официальные данные МЭШ: точное расписание уроков со звонками (таймингами), номерами кабинетов и учителями, а также домашние задания и база готовых решений.\n\
+             2. Отвечай прямо и точно на вопрос пользователя (расписание уроков, звонки, время начала/окончания уроков, перемены, кабинеты, домашние задания, объяснения тем и решений).\n\
+             3. Если пользователь спрашивает про конкретный день недели, сегодня, завтра или даты — сопоставь с текущей датой ({}) и расписанием МЭШ.\n\
+             4. Форматируй ответ в стиле Telegram Markdown/HTML: используй *жирный шрифт*, `моноширинный текст`, списки.\n\
+             5. ЗАПРЕЩЕНО использовать LaTeX ($$, $, \\frac, \\circ). Пиши обычным текстом, градусы знаком ° или °C.\n\
+             6. Не используй смайлики и эмодзи.\n\
+             7. Отвечай кратко, емко, без лишней воды и длинных вступлений.",
+            schedule_context,
+            mesh_context,
+            solutions_context,
+            query,
+            today.format("%d.%m.%Y (%A)")
+        );
+
+        let tg_client = self.tg.clone();
+        let solver = self.solver.clone();
+        let chat_id_str = chat_id.to_string();
+
+        tokio::spawn(async move {
+            match solver.ask_chat(&prompt, "gemini-3.8-flash-low").await {
+                Ok(reply) => {
+                    let _ = tg_client.send_message(&chat_id_str, &reply).await;
+                }
+                Err(e) => {
+                    warn!("Ошибка генерации ответа в AI чате: {}", e);
+                    let _ = tg_client.send_message(&chat_id_str, &format!("Не удалось получить ответ: {}", e)).await;
+                }
+            }
+        });
     }
 }
 
@@ -270,6 +410,237 @@ pub fn parse_target_day_input(input: &str, today: chrono::NaiveDate) -> (TargetD
             // По умолчанию - завтра
             (TargetDay::Tomorrow, "завтра".to_string())
         }
+    }
+}
+
+pub fn weekday_to_ru(wd: chrono::Weekday) -> &'static str {
+    match wd {
+        chrono::Weekday::Mon => "Понедельник",
+        chrono::Weekday::Tue => "Вторник",
+        chrono::Weekday::Wed => "Среда",
+        chrono::Weekday::Thu => "Четверг",
+        chrono::Weekday::Fri => "Пятница",
+        chrono::Weekday::Sat => "Суббота",
+        chrono::Weekday::Sun => "Воскресенье",
+    }
+}
+
+pub fn format_schedule_context(events: &[EventCalendarItem]) -> String {
+    if events.is_empty() {
+        return String::new();
+    }
+
+    use std::collections::BTreeMap;
+    let mut by_date: BTreeMap<String, Vec<&EventCalendarItem>> = BTreeMap::new();
+
+    for ev in events {
+        if let Some(ref start) = ev.start_at {
+            if start.len() >= 10 {
+                let date_str = &start[..10];
+                by_date.entry(date_str.to_string()).or_default().push(ev);
+            }
+        }
+    }
+
+    let mut out = String::new();
+    out.push_str("РАСПИСАНИЕ И ТАЙМИНГИ УРОКОВ (ЗВОНКИ, КАБИНЕТЫ, УЧИТЕЛЯ):\n");
+
+    for (date_str, mut day_events) in by_date {
+        day_events.sort_by_key(|e| e.start_at.as_deref().unwrap_or(""));
+
+        let day_title = if let Ok(d) = chrono::NaiveDate::parse_from_str(&date_str, "%Y-%m-%d") {
+            format!("{} ({})", d.format("%d.%m.%Y"), weekday_to_ru(d.weekday()))
+        } else {
+            date_str.clone()
+        };
+
+        out.push_str(&format!("• {}:\n", day_title));
+
+        for (idx, ev) in day_events.iter().enumerate() {
+            let num = idx + 1;
+            let start_time = ev
+                .start_at
+                .as_deref()
+                .and_then(|s| if s.len() >= 16 { Some(&s[11..16]) } else { None })
+                .unwrap_or("??:??");
+            let end_time = ev
+                .finish_at
+                .as_deref()
+                .and_then(|s| if s.len() >= 16 { Some(&s[11..16]) } else { None })
+                .unwrap_or("??:??");
+            let subject = ev.subject_name.as_deref().unwrap_or("Урок");
+
+            let mut details = Vec::new();
+            if let Some(ref room) = ev.room_number {
+                if !room.trim().is_empty() {
+                    details.push(format!("каб. {}", room.trim()));
+                }
+            } else if let Some(ref room) = ev.room_name {
+                if !room.trim().is_empty() {
+                    details.push(format!("каб. {}", room.trim()));
+                }
+            }
+
+            if let Some(ref teacher) = ev.teacher.as_ref().or(ev.author.as_ref()) {
+                let mut t_name = String::new();
+                if let Some(ref ln) = teacher.last_name {
+                    t_name.push_str(ln);
+                }
+                if let Some(ref fn_) = teacher.first_name {
+                    if let Some(ch) = fn_.chars().next() {
+                        t_name.push_str(&format!(" {}.", ch));
+                    }
+                }
+                if let Some(ref mn) = teacher.middle_name {
+                    if let Some(ch) = mn.chars().next() {
+                        t_name.push_str(&format!("{}.", ch));
+                    }
+                }
+                if !t_name.trim().is_empty() {
+                    details.push(format!("учитель: {}", t_name.trim()));
+                }
+            }
+
+            if ev.cancelled.unwrap_or(false) {
+                details.push("ОТМЕНЕН".to_string());
+            } else if ev.replaced.unwrap_or(false) {
+                details.push("ЗАМЕНА".to_string());
+            }
+
+            if let Some(ref marks) = ev.marks {
+                let marks_str: Vec<String> = marks.iter().filter_map(|m| m.value.clone()).collect();
+                if !marks_str.is_empty() {
+                    details.push(format!("оценка: {}", marks_str.join(", ")));
+                }
+            }
+
+            let details_str = if details.is_empty() {
+                String::new()
+            } else {
+                format!(" ({})", details.join(", "))
+            };
+
+            out.push_str(&format!(
+                "  {}. {} - {}: {}{}\n",
+                num, start_time, end_time, subject, details_str
+            ));
+        }
+        out.push('\n');
+    }
+
+    out
+}
+
+pub fn format_day_schedule_telegram(date: chrono::NaiveDate, events: &[EventCalendarItem]) -> String {
+    let date_str = date.format("%Y-%m-%d").to_string();
+    let mut day_events: Vec<&EventCalendarItem> = events
+        .iter()
+        .filter(|e| e.start_at.as_deref().map(|s| s.starts_with(&date_str)).unwrap_or(false))
+        .collect();
+
+    if day_events.is_empty() {
+        return format!(
+            "На {} ({}) уроков в расписании нет.",
+            date.format("%d.%m.%Y"),
+            weekday_to_ru(date.weekday())
+        );
+    }
+
+    day_events.sort_by_key(|e| e.start_at.as_deref().unwrap_or(""));
+
+    let mut out = format!(
+        "РАСПИСАНИЕ НА {} ({}):\n\n",
+        date.format("%d.%m.%Y"),
+        weekday_to_ru(date.weekday()).to_uppercase()
+    );
+
+    for (idx, ev) in day_events.iter().enumerate() {
+        let num = idx + 1;
+        let start_time = ev
+            .start_at
+            .as_deref()
+            .and_then(|s| if s.len() >= 16 { Some(&s[11..16]) } else { None })
+            .unwrap_or("??:??");
+        let end_time = ev
+            .finish_at
+            .as_deref()
+            .and_then(|s| if s.len() >= 16 { Some(&s[11..16]) } else { None })
+            .unwrap_or("??:??");
+        let subject = ev.subject_name.as_deref().unwrap_or("Урок");
+
+        let room = ev
+            .room_number
+            .as_deref()
+            .or(ev.room_name.as_deref())
+            .map(|r| format!(" • каб. {}", r.trim()))
+            .unwrap_or_default();
+
+        let status = if ev.cancelled.unwrap_or(false) {
+            " [ОТМЕНЕН]"
+        } else if ev.replaced.unwrap_or(false) {
+            " [ЗАМЕНА]"
+        } else {
+            ""
+        };
+
+        out.push_str(&format!(
+            "{}. `{} - {}` *{}*{}{}\n",
+            num, start_time, end_time, subject, room, status
+        ));
+    }
+
+    out
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_format_schedule_context() {
+        let events = vec![
+            EventCalendarItem {
+                id: Some(1),
+                start_at: Some("2026-10-02T08:30:00+03:00".to_string()),
+                finish_at: Some("2026-10-02T09:10:00+03:00".to_string()),
+                cancelled: Some(false),
+                replaced: Some(false),
+                is_missed_lesson: Some(false),
+                room_name: None,
+                room_number: Some("16".to_string()),
+                subject_id: Some(101),
+                subject_name: Some("Физика".to_string()),
+                teacher: None,
+                author: None,
+                homework: None,
+                marks: None,
+            },
+            EventCalendarItem {
+                id: Some(2),
+                start_at: Some("2026-10-02T09:30:00+03:00".to_string()),
+                finish_at: Some("2026-10-02T10:10:00+03:00".to_string()),
+                cancelled: Some(false),
+                replaced: Some(false),
+                is_missed_lesson: Some(false),
+                room_name: None,
+                room_number: Some("109".to_string()),
+                subject_id: Some(102),
+                subject_name: Some("Алгебра".to_string()),
+                teacher: None,
+                author: None,
+                homework: None,
+                marks: None,
+            },
+        ];
+
+        let text = format_schedule_context(&events);
+        assert!(text.contains("08:30 - 09:10: Физика (каб. 16)"));
+        assert!(text.contains("09:30 - 10:10: Алгебра (каб. 109)"));
+
+        let day_text = format_day_schedule_telegram(chrono::NaiveDate::from_ymd_opt(2026, 10, 2).unwrap(), &events);
+        assert!(day_text.contains("РАСПИСАНИЕ НА 02.10.2026"));
+        assert!(day_text.contains("08:30 - 09:10"));
+        assert!(day_text.contains("Физика"));
     }
 }
 
