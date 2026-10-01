@@ -61,6 +61,7 @@ impl BotHandler {
                         offset = Some(u.update_id + 1);
 
                         if let Some(msg) = u.message {
+                            let message_id = msg.message_id;
                             if let Some(text) = msg.text {
                                 let from = msg.from.as_ref();
                                 let from_id = from.map(|f| f.id).unwrap_or(0);
@@ -76,7 +77,7 @@ impl BotHandler {
                                 if text.starts_with('/') {
                                     self.handle_command(&chat_id, &text, from_username, from_id, is_admin).await;
                                 } else if text.starts_with('!') {
-                                    self.handle_chat_query(&chat_id, &text).await;
+                                    self.handle_chat_query(&chat_id, &text, message_id).await;
                                 }
                             }
                         }
@@ -259,13 +260,13 @@ impl BotHandler {
         }
     }
 
-    async fn handle_chat_query(&self, chat_id: &str, raw_text: &str) {
+    async fn handle_chat_query(&self, chat_id: &str, raw_text: &str, message_id: i64) {
         let query = raw_text.trim_start_matches('!').trim();
         if query.is_empty() {
             return;
         }
 
-        info!("Получен запрос к AI чату: '{}'", query);
+        info!("Получен запрос к AI чату (msg_id: {}): '{}'", message_id, query);
 
         let today = chrono::Local::now().date_naive();
         let from_date = today - chrono::Duration::days(14);
@@ -346,11 +347,17 @@ impl BotHandler {
         tokio::spawn(async move {
             match solver.ask_chat(&prompt, "gemini-3.8-flash-low").await {
                 Ok(reply) => {
-                    let _ = tg_client.send_message(&chat_id_str, &reply).await;
+                    let _ = tg_client.send_message_reply(&chat_id_str, &reply, Some(message_id)).await;
                 }
                 Err(e) => {
                     warn!("Ошибка генерации ответа в AI чате: {}", e);
-                    let _ = tg_client.send_message(&chat_id_str, &format!("Не удалось получить ответ: {}", e)).await;
+                    let _ = tg_client
+                        .send_message_reply(
+                            &chat_id_str,
+                            &format!("Не удалось получить ответ: {}", e),
+                            Some(message_id),
+                        )
+                        .await;
                 }
             }
         });

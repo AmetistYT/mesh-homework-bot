@@ -68,6 +68,15 @@ impl TelegramClient {
     }
 
     pub async fn send_message(&self, chat_id: &str, text: &str) -> Result<i64> {
+        self.send_message_reply(chat_id, text, None).await
+    }
+
+    pub async fn send_message_reply(
+        &self,
+        chat_id: &str,
+        text: &str,
+        reply_to_message_id: Option<i64>,
+    ) -> Result<i64> {
         let chunks = Self::split_message(text, 4000);
         let mut last_msg_id = 0;
 
@@ -79,12 +88,25 @@ impl TelegramClient {
             };
 
             let html_text = crate::telegram::formatter::markdown_to_telegram_html(&chunk_text);
-            let payload = json!({
+            let mut payload = json!({
                 "chat_id": chat_id,
                 "text": html_text,
                 "parse_mode": "HTML",
-                "disable_web_page_preview": true
+                "disable_web_page_preview": true,
+                "allow_sending_without_reply": true
             });
+
+            let target_reply = if idx == 0 {
+                reply_to_message_id
+            } else if last_msg_id > 0 {
+                Some(last_msg_id)
+            } else {
+                reply_to_message_id
+            };
+
+            if let Some(reply_id) = target_reply {
+                payload["reply_to_message_id"] = json!(reply_id);
+            }
 
             let resp = self
                 .client
@@ -100,11 +122,15 @@ impl TelegramClient {
                     "Ошибка отправки HTML в Telegram ({:?}), повторная отправка plain text...",
                     res.description
                 );
-                let plain_payload = json!({
+                let mut plain_payload = json!({
                     "chat_id": chat_id,
                     "text": chunk_text,
-                    "disable_web_page_preview": true
+                    "disable_web_page_preview": true,
+                    "allow_sending_without_reply": true
                 });
+                if let Some(reply_id) = target_reply {
+                    plain_payload["reply_to_message_id"] = json!(reply_id);
+                }
                 let plain_resp = self
                     .client
                     .post(self.api_url("sendMessage"))
