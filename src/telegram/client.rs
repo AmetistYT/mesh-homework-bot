@@ -1,7 +1,7 @@
 use anyhow::{anyhow, Context, Result};
 use reqwest::multipart::{Form, Part};
 use reqwest::Client;
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use serde_json::json;
 use std::path::Path;
 use tracing::info;
@@ -21,10 +21,11 @@ pub struct TelegramMessage {
     pub chat: TelegramChat,
     pub text: Option<String>,
     pub date: i64,
+    pub reply_to_message: Option<Box<TelegramMessage>>,
 }
 
 #[allow(dead_code)]
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct TelegramUser {
     pub id: i64,
     pub is_bot: bool,
@@ -33,13 +34,112 @@ pub struct TelegramUser {
 }
 
 #[allow(dead_code)]
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct TelegramChat {
     pub id: i64,
     pub title: Option<String>,
     pub username: Option<String>,
     #[serde(rename = "type")]
     pub chat_type: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct ChatPermissions {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub can_send_messages: Option<bool>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub can_send_audios: Option<bool>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub can_send_documents: Option<bool>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub can_send_photos: Option<bool>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub can_send_videos: Option<bool>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub can_send_video_notes: Option<bool>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub can_send_voice_notes: Option<bool>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub can_send_polls: Option<bool>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub can_send_other_messages: Option<bool>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub can_add_web_page_previews: Option<bool>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub can_change_info: Option<bool>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub can_invite_users: Option<bool>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub can_pin_messages: Option<bool>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub can_manage_topics: Option<bool>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct ChatAdminRights {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub is_anonymous: Option<bool>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub can_manage_chat: Option<bool>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub can_delete_messages: Option<bool>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub can_manage_video_chats: Option<bool>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub can_restrict_members: Option<bool>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub can_promote_members: Option<bool>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub can_change_info: Option<bool>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub can_invite_users: Option<bool>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub can_post_messages: Option<bool>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub can_edit_messages: Option<bool>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub can_pin_messages: Option<bool>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub can_post_stories: Option<bool>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub can_edit_stories: Option<bool>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub can_delete_stories: Option<bool>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub can_manage_topics: Option<bool>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ChatMember {
+    pub status: String,
+    pub user: TelegramUser,
+    pub custom_title: Option<String>,
+    pub is_anonymous: Option<bool>,
+    pub can_manage_chat: Option<bool>,
+    pub can_delete_messages: Option<bool>,
+    pub can_manage_video_chats: Option<bool>,
+    pub can_restrict_members: Option<bool>,
+    pub can_promote_members: Option<bool>,
+    pub can_change_info: Option<bool>,
+    pub can_invite_users: Option<bool>,
+    pub can_post_messages: Option<bool>,
+    pub can_edit_messages: Option<bool>,
+    pub can_pin_messages: Option<bool>,
+    pub can_post_stories: Option<bool>,
+    pub can_edit_stories: Option<bool>,
+    pub can_delete_stories: Option<bool>,
+    pub can_manage_topics: Option<bool>,
+    pub can_send_messages: Option<bool>,
+    pub can_send_audios: Option<bool>,
+    pub can_send_documents: Option<bool>,
+    pub can_send_photos: Option<bool>,
+    pub can_send_videos: Option<bool>,
+    pub can_send_video_notes: Option<bool>,
+    pub can_send_voice_notes: Option<bool>,
+    pub can_send_polls: Option<bool>,
+    pub can_send_other_messages: Option<bool>,
+    pub can_add_web_page_previews: Option<bool>,
+    pub until_date: Option<i64>,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -330,6 +430,200 @@ impl TelegramClient {
         }
 
         info!("Сообщение {} откреплено в группе {}", message_id, chat_id);
+        Ok(())
+    }
+
+    pub async fn get_chat_member(&self, chat_id: &str, user_id: i64) -> Result<ChatMember> {
+        let resp = self
+            .client
+            .get(self.api_url("getChatMember"))
+            .query(&[("chat_id", chat_id), ("user_id", &user_id.to_string())])
+            .send()
+            .await
+            .context("Ошибка запроса getChatMember")?;
+
+        let res: TelegramApiResponse<ChatMember> = resp.json().await?;
+        if !res.ok {
+            return Err(anyhow!(
+                "Ошибка Telegram API (getChatMember): {:?}",
+                res.description
+            ));
+        }
+
+        res.result.ok_or_else(|| anyhow!("Пустой результат getChatMember"))
+    }
+
+    pub async fn get_chat_administrators(&self, chat_id: &str) -> Result<Vec<ChatMember>> {
+        let resp = self
+            .client
+            .get(self.api_url("getChatAdministrators"))
+            .query(&[("chat_id", chat_id)])
+            .send()
+            .await
+            .context("Ошибка запроса getChatAdministrators")?;
+
+        let res: TelegramApiResponse<Vec<ChatMember>> = resp.json().await?;
+        if !res.ok {
+            return Err(anyhow!(
+                "Ошибка Telegram API (getChatAdministrators): {:?}",
+                res.description
+            ));
+        }
+
+        Ok(res.result.unwrap_or_default())
+    }
+
+    pub async fn restrict_chat_member(
+        &self,
+        chat_id: &str,
+        user_id: i64,
+        permissions: &ChatPermissions,
+        until_date: Option<i64>,
+    ) -> Result<()> {
+        let mut payload = json!({
+            "chat_id": chat_id,
+            "user_id": user_id,
+            "permissions": permissions,
+            "use_independent_chat_permissions": true
+        });
+
+        if let Some(until) = until_date {
+            if until > 0 {
+                payload["until_date"] = json!(until);
+            }
+        }
+
+        let resp = self
+            .client
+            .post(self.api_url("restrictChatMember"))
+            .json(&payload)
+            .send()
+            .await
+            .context("Ошибка выполнения HTTP запроса к Telegram API (restrictChatMember)")?;
+
+        let res: TelegramApiResponse<bool> = resp.json().await?;
+        if !res.ok {
+            return Err(anyhow!(
+                "Ошибка restrictChatMember: {:?}",
+                res.description
+            ));
+        }
+
+        Ok(())
+    }
+
+    pub async fn promote_chat_member(
+        &self,
+        chat_id: &str,
+        user_id: i64,
+        rights: &ChatAdminRights,
+    ) -> Result<()> {
+        let mut payload = serde_json::to_value(rights).unwrap_or_else(|_| json!({}));
+        payload["chat_id"] = json!(chat_id);
+        payload["user_id"] = json!(user_id);
+
+        let resp = self
+            .client
+            .post(self.api_url("promoteChatMember"))
+            .json(&payload)
+            .send()
+            .await
+            .context("Ошибка выполнения HTTP запроса к Telegram API (promoteChatMember)")?;
+
+        let res: TelegramApiResponse<bool> = resp.json().await?;
+        if !res.ok {
+            return Err(anyhow!(
+                "Ошибка promoteChatMember: {:?}",
+                res.description
+            ));
+        }
+
+        Ok(())
+    }
+
+    pub async fn set_chat_admin_custom_title(
+        &self,
+        chat_id: &str,
+        user_id: i64,
+        custom_title: &str,
+    ) -> Result<()> {
+        let payload = json!({
+            "chat_id": chat_id,
+            "user_id": user_id,
+            "custom_title": custom_title
+        });
+
+        let resp = self
+            .client
+            .post(self.api_url("setChatAdministratorCustomTitle"))
+            .json(&payload)
+            .send()
+            .await
+            .context("Ошибка запроса setChatAdministratorCustomTitle")?;
+
+        let res: TelegramApiResponse<bool> = resp.json().await?;
+        if !res.ok {
+            return Err(anyhow!(
+                "Ошибка setChatAdministratorCustomTitle: {:?}",
+                res.description
+            ));
+        }
+
+        Ok(())
+    }
+
+    pub async fn ban_chat_member(
+        &self,
+        chat_id: &str,
+        user_id: i64,
+        until_date: Option<i64>,
+    ) -> Result<()> {
+        let mut payload = json!({
+            "chat_id": chat_id,
+            "user_id": user_id
+        });
+        if let Some(until) = until_date {
+            if until > 0 {
+                payload["until_date"] = json!(until);
+            }
+        }
+
+        let resp = self
+            .client
+            .post(self.api_url("banChatMember"))
+            .json(&payload)
+            .send()
+            .await
+            .context("Ошибка запроса banChatMember")?;
+
+        let res: TelegramApiResponse<bool> = resp.json().await?;
+        if !res.ok {
+            return Err(anyhow!("Ошибка banChatMember: {:?}", res.description));
+        }
+
+        Ok(())
+    }
+
+    pub async fn unban_chat_member(&self, chat_id: &str, user_id: i64) -> Result<()> {
+        let payload = json!({
+            "chat_id": chat_id,
+            "user_id": user_id,
+            "only_if_banned": false
+        });
+
+        let resp = self
+            .client
+            .post(self.api_url("unbanChatMember"))
+            .json(&payload)
+            .send()
+            .await
+            .context("Ошибка запроса unbanChatMember")?;
+
+        let res: TelegramApiResponse<bool> = resp.json().await?;
+        if !res.ok {
+            return Err(anyhow!("Ошибка unbanChatMember: {:?}", res.description));
+        }
+
         Ok(())
     }
 

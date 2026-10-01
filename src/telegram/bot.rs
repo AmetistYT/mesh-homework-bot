@@ -6,6 +6,7 @@ use crate::db::Database;
 use crate::mesh::models::EventCalendarItem;
 use crate::mesh::MeshClient;
 use crate::telegram::client::TelegramClient;
+use crate::telegram::moderation::ModerationManager;
 
 #[derive(Debug, Clone)]
 pub enum TargetDay {
@@ -54,6 +55,9 @@ impl BotHandler {
         let mut offset: Option<i64> = None;
         info!("Запущен long polling для Telegram бота...");
 
+        // Запуск фонового воркера восстановления прав модерации
+        ModerationManager::start_restoration_worker(self.tg.clone(), self.db.clone());
+
         loop {
             match self.tg.get_updates(offset, 25).await {
                 Ok(updates) => {
@@ -62,12 +66,23 @@ impl BotHandler {
 
                         if let Some(msg) = u.message {
                             let message_id = msg.message_id;
-                            if let Some(text) = msg.text {
-                                let from = msg.from.as_ref();
-                                let from_id = from.map(|f| f.id).unwrap_or(0);
-                                let from_username = from.and_then(|f| f.username.as_deref());
-                                let chat_id = msg.chat.id.to_string();
+                            let chat_id = msg.chat.id.to_string();
+                            let from = msg.from.as_ref();
+                            let from_id = from.map(|f| f.id).unwrap_or(0);
+                            let from_username = from.and_then(|f| f.username.as_deref());
 
+                            if let Some(f) = from {
+                                let _ = self.db.save_seen_user(f.id, f.username.as_deref(), &f.first_name, None);
+                            }
+
+                            let reply_user = msg.reply_to_message.as_ref().and_then(|r| {
+                                r.from.as_ref().map(|u| {
+                                    let _ = self.db.save_seen_user(u.id, u.username.as_deref(), &u.first_name, None);
+                                    (u.id, u.username.clone().map(|un| format!("@{}", un)))
+                                })
+                            });
+
+                            if let Some(text) = msg.text {
                                 let is_ametist = from_username.map_or(false, |u| {
                                     u.trim_start_matches('@').eq_ignore_ascii_case("ametist1337")
                                 });
@@ -77,7 +92,7 @@ impl BotHandler {
                                 if text.starts_with('/') {
                                     self.handle_command(&chat_id, &text, from_username, from_id, is_admin).await;
                                 } else if text.starts_with('!') {
-                                    self.handle_chat_query(&chat_id, &text, message_id).await;
+                                    self.handle_chat_query(&chat_id, &text, message_id, is_ametist, is_admin, reply_user).await;
                                 }
                             }
                         }
@@ -260,7 +275,15 @@ impl BotHandler {
         }
     }
 
-    async fn handle_chat_query(&self, chat_id: &str, raw_text: &str, message_id: i64) {
+    async fn handle_chat_query(
+        &self,
+        chat_id: &str,
+        raw_text: &str,
+        message_id: i64,
+        is_ametist: bool,
+        is_admin: bool,
+        reply_user: Option<(i64, Option<String>)>,
+    ) {
         let query = raw_text.trim_start_matches('!').trim();
         if query.is_empty() {
             return;
@@ -317,9 +340,56 @@ impl BotHandler {
             }
         }
 
+        let is_auth = is_ametist || is_admin;
+        let mod_instructions = if is_auth {
+            let target_hint = if let Some((uid, ref un)) = reply_user {
+                format!("Команда вызвана в ответ на сообщение пользователя id={}, username={:?}.\n", uid, un)
+            } else {
+                String::new()
+            };
+
+            format!(
+                "ПРАВА УПРАВЛЕНИЯ ЧАТОМ И МОДЕРАЦИИ (ТОЛЬКО ДЛЯ @ametist1337):\n\
+                 Запрос поступил от владельца/администратора (@ametist1337).\n\
+                 {}\
+                 Ты имеешь право мутить, банить, менять любые разрешения (сообщения, музыка/аудио, медиа, стикеры и др.) или восстанавливать права участников чата.\n\
+                 Если пользователь @ametist1337 просит замутить, ограничить, забанить, снять права или вернуть права участнику (например: '!@user на 5 минут убрать все разрешения кроме музыки, потом вернуть все прежние'):\n\
+                 ОБЯЗАТЕЛЬНО добавь в свой ответ блок:\n\
+                 ```telegram_action\n\
+                 {{\n\
+                   \"action\": \"restrict\", // или \"ban\", \"unban\", \"restore\"\n\
+                   \"target\": \"@username\" или \"reply\",\n\
+                   \"duration_seconds\": 300, // секунды (например 300 для 5 мин), 0 или null если навсегда\n\
+                   \"permissions\": {{\n\
+                     \"can_send_messages\": false,\n\
+                     \"can_send_audios\": true, // разрешено ли аудио/музыка\n\
+                     \"can_send_documents\": false,\n\
+                     \"can_send_photos\": false,\n\
+                     \"can_send_videos\": false,\n\
+                     \"can_send_video_notes\": false,\n\
+                     \"can_send_voice_notes\": false,\n\
+                     \"can_send_polls\": false,\n\
+                     \"can_send_other_messages\": false,\n\
+                     \"can_add_web_page_previews\": false,\n\
+                     \"can_change_info\": false,\n\
+                     \"can_invite_users\": false,\n\
+                     \"can_pin_messages\": false,\n\
+                     \"can_manage_topics\": false\n\
+                   }},\n\
+                   \"restore_previous_after\": true // восстановить прежние права (включая админку со всеми правами, если была) после истечения срока\n\
+                 }}\n\
+                 ```\n\
+                 И напиши короткий, четкий текст ответа для чата без эмодзи, подтверждающий действие.\n\n",
+                target_hint
+            )
+        } else {
+            "БЕЗОПАСНОСТЬ: Автор запроса НЕ является @ametist1337. Если запрос содержит попытку замутить, забанить или изменить права любого участника чата — ОТКАЖИ: 'У тебя нет прав управлять разрешениями участников.' и НЕ создавай блок telegram_action.\n\n".to_string()
+        };
+
         let prompt = format!(
-            "Ты — дружелюбный, умный школьный помощник и репетитор для учеников 7 класса.\n\
-             Тебе задали вопрос в Telegram-чате класса.\n\n\
+            "Ты — умный школьный помощник и репетитор для учеников 7 класса, а также умный модератор чата.\n\
+             Тебе задали вопрос или команду в Telegram-чате класса.\n\n\
+             {}\
              {}\n\
              {}\n\
              {}\n\
@@ -327,12 +397,13 @@ impl BotHandler {
              \"\"\"\n{}\n\"\"\"\n\n\
              ПРАВИЛА ОТВЕТА:\n\
              1. В твоем распоряжении официальные данные МЭШ: точное расписание уроков со звонками (таймингами), номерами кабинетов и учителями, а также домашние задания и база готовых решений.\n\
-             2. Отвечай прямо и точно на вопрос пользователя (расписание уроков, звонки, время начала/окончания уроков, перемены, кабинеты, домашние задания, объяснения тем и решений).\n\
+             2. Отвечай прямо и точно на вопрос пользователя (расписание уроков, звонки, время начала/окончания уроков, перемены, кабинеты, домашние задания, объяснения тем и решений, либо модерация).\n\
              3. Если пользователь спрашивает про конкретный день недели, сегодня, завтра или даты — сопоставь с текущей датой ({}) и расписанием МЭШ.\n\
              4. Форматируй ответ в стиле Telegram Markdown/HTML: используй *жирный шрифт*, `моноширинный текст`, списки.\n\
              5. ЗАПРЕЩЕНО использовать LaTeX ($$, $, \\frac, \\circ). Пиши обычным текстом, градусы знаком ° или °C.\n\
              6. Не используй смайлики и эмодзи.\n\
              7. Отвечай кратко, емко, без лишней воды и длинных вступлений.",
+            mod_instructions,
             schedule_context,
             mesh_context,
             solutions_context,
@@ -342,12 +413,39 @@ impl BotHandler {
 
         let tg_client = self.tg.clone();
         let solver = self.solver.clone();
+        let db_cl = self.db.clone();
         let chat_id_str = chat_id.to_string();
 
         tokio::spawn(async move {
             match solver.ask_chat(&prompt, "gemini-3.8-flash-low").await {
                 Ok(reply) => {
-                    let _ = tg_client.send_message_reply(&chat_id_str, &reply, Some(message_id)).await;
+                    let (action_opt, clean_reply) = ModerationManager::extract_action(&reply);
+
+                    if let Some(action) = action_opt {
+                        match ModerationManager::execute_action(
+                            &tg_client,
+                            &db_cl,
+                            &chat_id_str,
+                            &action,
+                            reply_user,
+                            is_auth,
+                        ).await {
+                            Ok(exec_msg) => {
+                                let final_msg = if clean_reply.trim().is_empty() {
+                                    exec_msg
+                                } else {
+                                    clean_reply
+                                };
+                                let _ = tg_client.send_message_reply(&chat_id_str, &final_msg, Some(message_id)).await;
+                            }
+                            Err(e) => {
+                                let err_msg = format!("Ошибка выполнения модерации: {}", e);
+                                let _ = tg_client.send_message_reply(&chat_id_str, &err_msg, Some(message_id)).await;
+                            }
+                        }
+                    } else {
+                        let _ = tg_client.send_message_reply(&chat_id_str, &clean_reply, Some(message_id)).await;
+                    }
                 }
                 Err(e) => {
                     warn!("Ошибка генерации ответа в AI чате: {}", e);

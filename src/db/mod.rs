@@ -30,6 +30,21 @@ pub struct DbStats {
     pub pending: i64,
 }
 
+#[derive(Debug, Clone)]
+pub struct PermissionBackupRecord {
+    pub id: i64,
+    pub chat_id: String,
+    pub user_id: i64,
+    pub username: Option<String>,
+    pub original_status: String,
+    pub custom_title: Option<String>,
+    pub admin_rights_json: Option<String>,
+    pub permissions_json: Option<String>,
+    pub restore_at: Option<i64>,
+    pub restored: bool,
+    pub created_at: String,
+}
+
 #[derive(Clone)]
 pub struct Database {
     conn: Arc<Mutex<Connection>>,
@@ -67,8 +82,33 @@ impl Database {
                 updated_at TEXT NOT NULL
             );
 
+            CREATE TABLE IF NOT EXISTS seen_users (
+                user_id INTEGER PRIMARY KEY,
+                username TEXT,
+                first_name TEXT,
+                last_name TEXT,
+                last_seen TEXT NOT NULL
+            );
+
+            CREATE TABLE IF NOT EXISTS permission_backups (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                chat_id TEXT NOT NULL,
+                user_id INTEGER NOT NULL,
+                username TEXT,
+                original_status TEXT NOT NULL,
+                custom_title TEXT,
+                admin_rights_json TEXT,
+                permissions_json TEXT,
+                restore_at INTEGER,
+                restored INTEGER DEFAULT 0,
+                created_at TEXT NOT NULL
+            );
+
             CREATE INDEX IF NOT EXISTS idx_hw_entry_id ON processed_homeworks (homework_entry_student_id);
             CREATE INDEX IF NOT EXISTS idx_hw_status ON processed_homeworks (status);
+            CREATE INDEX IF NOT EXISTS idx_seen_username ON seen_users (username);
+            CREATE INDEX IF NOT EXISTS idx_perm_user ON permission_backups (chat_id, user_id);
+            CREATE INDEX IF NOT EXISTS idx_perm_restore ON permission_backups (restore_at, restored);
             ",
         )
         .context("Ошибка создания таблиц SQLite")?;
@@ -283,5 +323,151 @@ impl Database {
             failed,
             pending,
         })
+    }
+
+    pub fn save_seen_user(
+        &self,
+        user_id: i64,
+        username: Option<&str>,
+        first_name: &str,
+        last_name: Option<&str>,
+    ) -> Result<()> {
+        let conn = self.conn.lock().unwrap();
+        let now = Local::now().to_rfc3339();
+        let clean_username = username.map(|u| u.trim_start_matches('@').to_lowercase());
+
+        conn.execute(
+            "INSERT INTO seen_users (user_id, username, first_name, last_name, last_seen)
+             VALUES (?1, ?2, ?3, ?4, ?5)
+             ON CONFLICT(user_id) DO UPDATE SET
+                username = excluded.username,
+                first_name = excluded.first_name,
+                last_name = excluded.last_name,
+                last_seen = excluded.last_seen",
+            params![user_id, clean_username, first_name, last_name, now],
+        )?;
+        Ok(())
+    }
+
+    pub fn find_user_by_username(&self, username: &str) -> Result<Option<i64>> {
+        let conn = self.conn.lock().unwrap();
+        let clean = username.trim_start_matches('@').to_lowercase();
+        let mut stmt = conn.prepare("SELECT user_id FROM seen_users WHERE lower(username) = ?1 LIMIT 1")?;
+        let mut rows = stmt.query(params![clean])?;
+        if let Some(row) = rows.next()? {
+            Ok(Some(row.get(0)?))
+        } else {
+            Ok(None)
+        }
+    }
+
+    pub fn save_permission_backup(
+        &self,
+        chat_id: &str,
+        user_id: i64,
+        username: Option<&str>,
+        original_status: &str,
+        custom_title: Option<&str>,
+        admin_rights_json: Option<&str>,
+        permissions_json: Option<&str>,
+        restore_at: Option<i64>,
+    ) -> Result<i64> {
+        let conn = self.conn.lock().unwrap();
+        let now = Local::now().to_rfc3339();
+
+        conn.execute(
+            "INSERT INTO permission_backups (
+                chat_id, user_id, username, original_status, custom_title,
+                admin_rights_json, permissions_json, restore_at, restored, created_at
+            ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, 0, ?9)",
+            params![
+                chat_id,
+                user_id,
+                username,
+                original_status,
+                custom_title,
+                admin_rights_json,
+                permissions_json,
+                restore_at,
+                now
+            ],
+        )?;
+
+        Ok(conn.last_insert_rowid())
+    }
+
+    pub fn get_latest_active_backup(&self, chat_id: &str, user_id: i64) -> Result<Option<PermissionBackupRecord>> {
+        let conn = self.conn.lock().unwrap();
+        let mut stmt = conn.prepare(
+            "SELECT id, chat_id, user_id, username, original_status, custom_title,
+                    admin_rights_json, permissions_json, restore_at, restored, created_at
+             FROM permission_backups
+             WHERE chat_id = ?1 AND user_id = ?2 AND restored = 0
+             ORDER BY id DESC LIMIT 1"
+        )?;
+
+        let mut rows = stmt.query(params![chat_id, user_id])?;
+        if let Some(row) = rows.next()? {
+            let restored_int: i64 = row.get(9)?;
+            Ok(Some(PermissionBackupRecord {
+                id: row.get(0)?,
+                chat_id: row.get(1)?,
+                user_id: row.get(2)?,
+                username: row.get(3)?,
+                original_status: row.get(4)?,
+                custom_title: row.get(5)?,
+                admin_rights_json: row.get(6)?,
+                permissions_json: row.get(7)?,
+                restore_at: row.get(8)?,
+                restored: restored_int != 0,
+                created_at: row.get(10)?,
+            }))
+        } else {
+            Ok(None)
+        }
+    }
+
+    pub fn mark_backup_restored(&self, backup_id: i64) -> Result<()> {
+        let conn = self.conn.lock().unwrap();
+        conn.execute(
+            "UPDATE permission_backups SET restored = 1 WHERE id = ?1",
+            params![backup_id],
+        )?;
+        Ok(())
+    }
+
+    pub fn get_pending_restorations(&self) -> Result<Vec<PermissionBackupRecord>> {
+        let conn = self.conn.lock().unwrap();
+        let now_ts = chrono::Utc::now().timestamp();
+        let mut stmt = conn.prepare(
+            "SELECT id, chat_id, user_id, username, original_status, custom_title,
+                    admin_rights_json, permissions_json, restore_at, restored, created_at
+             FROM permission_backups
+             WHERE restored = 0 AND restore_at IS NOT NULL AND restore_at <= ?1
+             ORDER BY id ASC"
+        )?;
+
+        let rows = stmt.query_map(params![now_ts], |row| {
+            let restored_int: i64 = row.get(9)?;
+            Ok(PermissionBackupRecord {
+                id: row.get(0)?,
+                chat_id: row.get(1)?,
+                user_id: row.get(2)?,
+                username: row.get(3)?,
+                original_status: row.get(4)?,
+                custom_title: row.get(5)?,
+                admin_rights_json: row.get(6)?,
+                permissions_json: row.get(7)?,
+                restore_at: row.get(8)?,
+                restored: restored_int != 0,
+                created_at: row.get(10)?,
+            })
+        })?;
+
+        let mut list = Vec::new();
+        for r in rows {
+            list.push(r?);
+        }
+        Ok(list)
     }
 }
