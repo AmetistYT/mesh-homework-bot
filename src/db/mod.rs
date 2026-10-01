@@ -361,6 +361,52 @@ impl Database {
         }
     }
 
+    pub fn find_user_by_name_or_username(&self, query: &str) -> Result<Option<(i64, Option<String>)>> {
+        let conn = self.conn.lock().unwrap();
+        let clean = query.trim_start_matches('@').trim().to_lowercase();
+        if clean.is_empty() {
+            return Ok(None);
+        }
+
+        let mut stmt = conn.prepare("SELECT user_id, username, first_name, last_name FROM seen_users")?;
+        let rows = stmt.query_map([], |row| {
+            let uid: i64 = row.get(0)?;
+            let un: Option<String> = row.get(1)?;
+            let fn_: Option<String> = row.get(2)?;
+            let ln: Option<String> = row.get(3)?;
+            Ok((uid, un, fn_, ln))
+        })?;
+
+        let mut exact_match = None;
+        let mut partial_match = None;
+
+        for r in rows.flatten() {
+            let (uid, un, fn_, ln) = r;
+            let un_low = un.as_deref().unwrap_or("").to_lowercase();
+            let fn_low = fn_.as_deref().unwrap_or("").to_lowercase();
+            let ln_low = ln.as_deref().unwrap_or("").to_lowercase();
+
+            if (!un_low.is_empty() && un_low == clean)
+                || (!fn_low.is_empty() && fn_low == clean)
+                || (!ln_low.is_empty() && ln_low == clean)
+            {
+                exact_match = Some((uid, un));
+                break;
+            }
+
+            if (!fn_low.is_empty() && (fn_low.contains(&clean) || clean.contains(&fn_low)))
+                || (!ln_low.is_empty() && (ln_low.contains(&clean) || clean.contains(&ln_low)))
+                || (!un_low.is_empty() && un_low.contains(&clean))
+            {
+                if partial_match.is_none() {
+                    partial_match = Some((uid, un));
+                }
+            }
+        }
+
+        Ok(exact_match.or(partial_match))
+    }
+
     pub fn save_permission_backup(
         &self,
         chat_id: &str,

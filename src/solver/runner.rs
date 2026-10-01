@@ -75,7 +75,7 @@ impl SolverRunner {
                     user,
                     port,
                     agy_bin,
-                } => self.solve_ssh(host, user, *port, agy_bin, prompt, model).await,
+                } => self.solve_ssh_chat(host, user, *port, agy_bin, prompt, model).await,
             }
         };
 
@@ -253,6 +253,49 @@ impl SolverRunner {
         }
 
         Ok(cleaned)
+    }
+
+    async fn solve_ssh_chat(
+        &self,
+        host: &str,
+        user: &str,
+        port: u16,
+        agy_bin: &str,
+        prompt: &str,
+        model: &str,
+    ) -> Result<String> {
+        let escaped_prompt = prompt.replace('\'', "'\\''");
+        let remote_cmd = format!("cd {} && LANG=en_US.UTF-8 LC_ALL=en_US.UTF-8 {} --dangerously-skip-permissions --model {} -p '{}'", self.working_dir.display(), agy_bin, model, escaped_prompt);
+
+        let mut cmd = Command::new("ssh");
+        cmd.arg("-o")
+            .arg("StrictHostKeyChecking=no")
+            .arg("-o")
+            .arg("UserKnownHostsFile=/dev/null")
+            .arg("-p")
+            .arg(port.to_string())
+            .arg(format!("{}@{}", user, host))
+            .arg(&remote_cmd)
+            .kill_on_drop(true);
+
+        let output = cmd.output()
+            .await
+            .context("Не удалось запустить команду через ssh")?;
+
+        if !output.status.success() {
+            let stderr = String::from_utf8_lossy(&output.stderr);
+            let stdout = String::from_utf8_lossy(&output.stdout);
+            return Err(anyhow!(
+                "Удаленный agy по SSH завершился с ошибкой:\nstdout: {}\nstderr: {}",
+                stdout,
+                stderr
+            ));
+        }
+
+        let solution = String::from_utf8_lossy(&output.stdout).to_string();
+        let ansi_cleaned = Self::strip_ansi(&solution);
+        let latex_cleaned = crate::solver::latex::clean_latex(&ansi_cleaned);
+        Ok(latex_cleaned)
     }
 
     fn clean_solution(raw: &str) -> String {

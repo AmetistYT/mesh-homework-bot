@@ -72,13 +72,13 @@ impl BotHandler {
                             let from_username = from.and_then(|f| f.username.as_deref());
 
                             if let Some(f) = from {
-                                let _ = self.db.save_seen_user(f.id, f.username.as_deref(), &f.first_name, None);
+                                let _ = self.db.save_seen_user(f.id, f.username.as_deref(), &f.first_name, f.last_name.as_deref());
                             }
 
                             let reply_user = msg.reply_to_message.as_ref().and_then(|r| {
                                 r.from.as_ref().map(|u| {
-                                    let _ = self.db.save_seen_user(u.id, u.username.as_deref(), &u.first_name, None);
-                                    (u.id, u.username.clone().map(|un| format!("@{}", un)))
+                                    let _ = self.db.save_seen_user(u.id, u.username.as_deref(), &u.first_name, u.last_name.as_deref());
+                                    (u.id, u.username.clone().map(|un| format!("@{}", un)), Some(u.first_name.clone()))
                                 })
                             });
 
@@ -282,7 +282,7 @@ impl BotHandler {
         message_id: i64,
         is_ametist: bool,
         is_admin: bool,
-        reply_user: Option<(i64, Option<String>)>,
+        reply_user: Option<(i64, Option<String>, Option<String>)>,
     ) {
         let query = raw_text.trim_start_matches('!').trim();
         if query.is_empty() {
@@ -342,8 +342,12 @@ impl BotHandler {
 
         let is_auth = is_ametist || is_admin;
         let mod_instructions = if is_auth {
-            let target_hint = if let Some((uid, ref un)) = reply_user {
-                format!("Команда вызвана в ответ на сообщение пользователя id={}, username={:?}.\n", uid, un)
+            let target_hint = if let Some((uid, ref un, ref fn_)) = reply_user {
+                format!(
+                    "Команда вызвана в ответ (reply) на сообщение участника: id={}, username={:?}, first_name={:?}.\n\
+                     Если действие направлено на него, обязательно пиши \"target\": \"reply\".\n",
+                    uid, un, fn_
+                )
             } else {
                 String::new()
             };
@@ -353,16 +357,16 @@ impl BotHandler {
                  Запрос поступил от владельца/администратора (@ametist1337).\n\
                  {}\
                  Ты имеешь право мутить, банить, менять любые разрешения (сообщения, музыка/аудио, медиа, стикеры и др.) или восстанавливать права участников чата.\n\
-                 Если пользователь @ametist1337 просит замутить, ограничить, забанить, снять права или вернуть права участнику (например: '!@user на 5 минут убрать все разрешения кроме музыки, потом вернуть все прежние'):\n\
+                 Если пользователь @ametist1337 просит замутить, ограничить, забанить, снять права или вернуть права участнику (например: '!верни голос для Имран' или '!@user на 5 минут убрать все разрешения кроме музыки, потом вернуть все прежние'):\n\
                  ОБЯЗАТЕЛЬНО добавь в свой ответ блок:\n\
                  ```telegram_action\n\
                  {{\n\
-                   \"action\": \"restrict\", // или \"ban\", \"unban\", \"restore\"\n\
-                   \"target\": \"@username\" или \"reply\",\n\
-                   \"duration_seconds\": 300, // секунды (например 300 для 5 мин), 0 или null если навсегда\n\
+                   \"action\": \"restrict\",\n\
+                   \"target\": \"reply\",\n\
+                   \"duration_seconds\": 300,\n\
                    \"permissions\": {{\n\
                      \"can_send_messages\": false,\n\
-                     \"can_send_audios\": true, // разрешено ли аудио/музыка\n\
+                     \"can_send_audios\": true,\n\
                      \"can_send_documents\": false,\n\
                      \"can_send_photos\": false,\n\
                      \"can_send_videos\": false,\n\
@@ -376,10 +380,16 @@ impl BotHandler {
                      \"can_pin_messages\": false,\n\
                      \"can_manage_topics\": false\n\
                    }},\n\
-                   \"restore_previous_after\": true // восстановить прежние права (включая админку со всеми правами, если была) после истечения срока\n\
+                   \"restore_previous_after\": true\n\
                  }}\n\
                  ```\n\
-                 И напиши короткий, четкий текст ответа для чата без эмодзи, подтверждающий действие.\n\n",
+                 ВАЖНО ДЛЯ БЛОКА telegram_action:\n\
+                 1. JSON должен быть строго валидным, БЕЗ комментариев // и без лишних запятых.\n\
+                 2. action может быть: \"restrict\" (наложить ограничения или выдать голос/разрешения через permissions), \"restore\" (вернуть прежние права или снять все ограничения), \"ban\" (забанить), \"unban\" (разбанить).\n\
+                 3. target: \"reply\" (если команда вызвана в ответ на сообщение), либо @username, ID или имя участника.\n\
+                 4. duration_seconds: количество секунд (null если навсегда).\n\
+                 5. restore_previous_after: true если нужно вернуть прежние права (включая админку со всеми правами, если была) после истечения срока.\n\
+                 6. Обязательно напиши короткий, человечный текст ответа для чата без эмодзи, подтверждающий действие.\n\n",
                 target_hint
             )
         } else {
@@ -444,7 +454,12 @@ impl BotHandler {
                             }
                         }
                     } else {
-                        let _ = tg_client.send_message_reply(&chat_id_str, &clean_reply, Some(message_id)).await;
+                        let final_msg = if clean_reply.trim().is_empty() {
+                            "Команда обработана, но действие не распознано.".to_string()
+                        } else {
+                            clean_reply
+                        };
+                        let _ = tg_client.send_message_reply(&chat_id_str, &final_msg, Some(message_id)).await;
                     }
                 }
                 Err(e) => {

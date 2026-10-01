@@ -1,6 +1,26 @@
 /// Очистка текста от LaTeX-синтаксиса ($$, $, \text, \circ, \frac, {, })
 /// для красивого и чистого отображения в Telegram.
 pub fn clean_latex(input: &str) -> String {
+    if input.contains("```") {
+        let mut result = String::new();
+        let parts: Vec<&str> = input.split("```").collect();
+        for (i, part) in parts.iter().enumerate() {
+            if i % 2 == 1 {
+                // Внутри кодового блока - сохраняем строго без изменений
+                result.push_str("```");
+                result.push_str(part);
+                result.push_str("```");
+            } else {
+                result.push_str(&clean_latex_inner(part));
+            }
+        }
+        return result;
+    }
+
+    clean_latex_inner(input)
+}
+
+fn clean_latex_inner(input: &str) -> String {
     let mut s = input.to_string();
 
     // 1. Удаляем блочные и строчные математические разделители: $$, $, \(, \), \[, \]
@@ -164,22 +184,10 @@ pub fn clean_latex(input: &str) -> String {
     // 11. Удаляем оставшиеся знаки '$' (инлайн-математика)
     s = s.replace('$', "");
 
-    // 12. Удаляем оставшиеся фигурные скобки { и }, если они были частью синтаксиса
-    let mut clean_chars = String::with_capacity(s.len());
-    let mut chars = s.chars().peekable();
-    while let Some(c) = chars.next() {
-        if c == '{' {
-            if chars.peek() == Some(&'}') {
-                chars.next();
-            }
-        } else if c == '}' {
-            // пропускаем закрывающую фигурную скобку
-        } else {
-            clean_chars.push(c);
-        }
-    }
+    // 12. Удаляем пустые фигурные скобки {}, если они остались от удаленных тегов LaTeX
+    s = s.replace("{}", "");
 
-    clean_chars
+    s
 }
 
 fn parse_one_braced_arg(s: &str) -> Option<(String, usize)> {
@@ -233,5 +241,13 @@ mod tests {
 
         let frac = "\\rho = \\frac{m}{V}";
         assert_eq!(clean_latex(frac), "ρ = m / V");
+    }
+
+    #[test]
+    fn test_clean_latex_preserves_code_and_json() {
+        let text = "Ответ:\n```json\n{\n  \"action\": \"restrict\",\n  \"target\": \"Имран\"\n}\n```\nФормула: $x = 5$";
+        let cleaned = clean_latex(text);
+        assert!(cleaned.contains("{\n  \"action\": \"restrict\",\n  \"target\": \"Имран\"\n}"));
+        assert!(cleaned.contains("Формула: x = 5"));
     }
 }
