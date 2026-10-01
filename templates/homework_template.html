@@ -1,0 +1,716 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=5.0, user-scalable=yes">
+  <title>Домашнее задание — {{date_title}}</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Nunito:wght@400;500;600;700;800&family=JetBrains+Mono:wght@400;500;600;700&display=swap" rel="stylesheet">
+  <style>
+    :root {
+      --bg: #121215;
+      --card-bg: #1a1a20;
+      --card-hover: #22222a;
+      --card-open: #1d1d24;
+      --border: #2a2a35;
+      --border-focus: #424252;
+      --text: #ececf2;
+      --text-muted: #9c9cae;
+      --text-dim: #6c6c7e;
+      --badge-cdz-bg: #282834;
+      --badge-cdz-text: #dedee8;
+      --badge-cdz-border: #3e3e50;
+      --code-bg: #151519;
+      --task-bg: #16161c;
+      --answer-bg: #15151a;
+      --answer-border: #3a3a4a;
+      --table-header: #212129;
+      --table-row-alt: #16161b;
+      --btn-active: #2a2a36;
+    }
+
+    * {
+      box-sizing: border-box;
+      margin: 0;
+      padding: 0;
+      -webkit-tap-highlight-color: transparent;
+    }
+
+    body {
+      background-color: var(--bg);
+      color: var(--text);
+      font-family: 'Nunito', -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+      font-size: 15.5px;
+      line-height: 1.6;
+      padding: 18px 14px 48px;
+      max-width: 640px;
+      margin: 0 auto;
+      text-rendering: optimizeLegibility;
+      -webkit-font-smoothing: antialiased;
+    }
+
+    /* HEADER */
+    .header {
+      padding: 10px 4px 18px;
+      border-bottom: 1px solid var(--border);
+      margin-bottom: 16px;
+    }
+
+    .header-top {
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      margin-bottom: 6px;
+    }
+
+    .app-title {
+      font-size: 11px;
+      letter-spacing: 0.12em;
+      text-transform: uppercase;
+      font-weight: 700;
+      color: var(--text-dim);
+      font-family: 'JetBrains Mono', ui-monospace, monospace;
+    }
+
+    .header-counter {
+      font-size: 11px;
+      letter-spacing: 0.08em;
+      text-transform: uppercase;
+      font-weight: 700;
+      color: var(--text-muted);
+      font-family: 'JetBrains Mono', ui-monospace, monospace;
+      background: var(--card-bg);
+      padding: 3px 8px;
+      border-radius: 4px;
+      border: 1px solid var(--border);
+    }
+
+    .header-date {
+      font-size: 22px;
+      font-weight: 800;
+      letter-spacing: -0.02em;
+      color: var(--text);
+      text-transform: capitalize;
+    }
+
+    .meta-bar {
+      display: flex;
+      gap: 12px;
+      font-size: 12px;
+      color: var(--text-muted);
+      font-family: 'JetBrains Mono', ui-monospace, monospace;
+      margin-top: 5px;
+    }
+
+    .meta-item {
+      display: inline-flex;
+      align-items: center;
+      gap: 5px;
+    }
+
+    .meta-dot {
+      width: 4px;
+      height: 4px;
+      background-color: var(--text-dim);
+      border-radius: 50%;
+    }
+
+    /* CONTROLS */
+    .controls {
+      display: flex;
+      gap: 8px;
+      margin-bottom: 16px;
+    }
+
+    .btn-ctrl {
+      flex: 1;
+      background: var(--card-bg);
+      border: 1px solid var(--border);
+      color: var(--text-muted);
+      font-size: 11.5px;
+      font-family: 'Nunito', sans-serif;
+      font-weight: 700;
+      letter-spacing: 0.04em;
+      text-transform: uppercase;
+      padding: 8px 10px;
+      border-radius: 8px;
+      cursor: pointer;
+      transition: all 0.2s cubic-bezier(0.16, 1, 0.3, 1);
+    }
+
+    .btn-ctrl:active {
+      transform: scale(0.98);
+      background: var(--btn-active);
+      color: var(--text);
+      border-color: var(--border-focus);
+    }
+
+    /* SUBJECT CARD (ACCORDION) */
+    .subject-list {
+      display: flex;
+      flex-direction: column;
+      gap: 12px;
+    }
+
+    .subject-card {
+      background-color: var(--card-bg);
+      border: 1px solid var(--border);
+      border-radius: 10px;
+      overflow: hidden;
+      transition: all 0.25s cubic-bezier(0.16, 1, 0.3, 1);
+    }
+
+    .subject-card[open] {
+      background-color: var(--card-open);
+      border-color: var(--border-focus);
+    }
+
+    .subject-summary {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      padding: 14px 15px;
+      cursor: pointer;
+      user-select: none;
+      list-style: none;
+      gap: 12px;
+      transition: background-color 0.2s ease;
+    }
+
+    .subject-summary:hover {
+      background-color: var(--card-hover);
+    }
+
+    .subject-summary::-webkit-details-marker {
+      display: none;
+    }
+
+    .subject-meta {
+      flex: 1;
+      min-width: 0;
+    }
+
+    .subject-header-row {
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      margin-bottom: 3px;
+    }
+
+    .subject-title {
+      font-size: 17px;
+      font-weight: 800;
+      color: var(--text);
+      letter-spacing: -0.01em;
+      white-space: nowrap;
+      overflow: hidden;
+      text-overflow: ellipsis;
+    }
+
+    .badge-cdz {
+      font-size: 10.5px;
+      font-weight: 700;
+      letter-spacing: 0.06em;
+      text-transform: uppercase;
+      padding: 2px 7px;
+      border-radius: 4px;
+      font-family: 'JetBrains Mono', ui-monospace, monospace;
+      flex-shrink: 0;
+      background-color: var(--badge-cdz-bg);
+      color: var(--badge-cdz-text);
+      border: 1px solid var(--badge-cdz-border);
+    }
+
+    .subject-preview {
+      font-size: 12.5px;
+      color: var(--text-dim);
+      white-space: nowrap;
+      overflow: hidden;
+      text-overflow: ellipsis;
+      font-family: 'Nunito', sans-serif;
+    }
+
+    .chevron {
+      width: 18px;
+      height: 18px;
+      flex-shrink: 0;
+      stroke: var(--text-muted);
+      stroke-width: 2.2;
+      stroke-linecap: round;
+      stroke-linejoin: round;
+      fill: none;
+      transition: transform 0.25s cubic-bezier(0.16, 1, 0.3, 1), stroke 0.2s ease;
+    }
+
+    .subject-card[open] .chevron {
+      transform: rotate(180deg);
+      stroke: var(--text);
+    }
+
+    /* CARD CONTENT */
+    .subject-content {
+      padding: 0 15px 16px;
+      border-top: 1px solid var(--border);
+      animation: fadeInContent 0.25s ease-out;
+    }
+
+    @keyframes fadeInContent {
+      from {
+        opacity: 0;
+        transform: translateY(-4px);
+      }
+      to {
+        opacity: 1;
+        transform: translateY(0);
+      }
+    }
+
+    /* TASK ASSIGNMENT BLOCK */
+    .task-box {
+      margin-top: 14px;
+      padding: 10px 13px;
+      background: var(--task-bg);
+      border-left: 3px solid var(--text-dim);
+      border-radius: 0 6px 6px 0;
+      font-size: 13.5px;
+    }
+
+    .task-label {
+      font-size: 10.5px;
+      font-family: 'JetBrains Mono', ui-monospace, monospace;
+      text-transform: uppercase;
+      letter-spacing: 0.08em;
+      color: var(--text-dim);
+      font-weight: 700;
+      margin-bottom: 4px;
+    }
+
+    .task-text {
+      color: var(--text-muted);
+      white-space: pre-wrap;
+      word-break: break-word;
+      line-height: 1.5;
+    }
+
+    /* SOLUTION BODY */
+    .solution-body {
+      margin-top: 16px;
+      font-size: 14.5px;
+      color: var(--text);
+    }
+
+    .solution-body h3, 
+    .solution-body h4 {
+      font-size: 15px;
+      font-weight: 700;
+      margin: 16px 0 8px;
+      letter-spacing: -0.01em;
+      color: var(--text);
+      border-bottom: 1px solid var(--border);
+      padding-bottom: 4px;
+    }
+
+    .solution-body p {
+      margin-bottom: 10px;
+    }
+
+    .solution-body ul, 
+    .solution-body ol {
+      margin: 8px 0 12px 20px;
+    }
+
+    .solution-body li {
+      margin-bottom: 4px;
+    }
+
+    .solution-body strong {
+      color: #ffffff;
+      font-weight: 700;
+    }
+
+    .solution-body code {
+      font-family: 'JetBrains Mono', ui-monospace, monospace;
+      font-size: 13px;
+      background: var(--code-bg);
+      padding: 2px 5px;
+      border-radius: 4px;
+      border: 1px solid var(--border);
+    }
+
+    .solution-body hr {
+      border: none;
+      border-top: 1px solid var(--border);
+      margin: 16px 0;
+    }
+
+    /* ANSWER CALLOUT */
+    .answer-box {
+      margin: 14px 0;
+      padding: 11px 13px;
+      background: var(--answer-bg);
+      border: 1px solid var(--answer-border);
+      border-radius: 8px;
+      font-size: 13.5px;
+      color: #ffffff;
+      line-height: 1.5;
+    }
+
+    .answer-box strong {
+      color: #ffffff;
+      letter-spacing: 0.02em;
+    }
+
+    /* TABLE */
+    .table-container {
+      width: 100%;
+      overflow-x: auto;
+      -webkit-overflow-scrolling: touch;
+      margin: 14px 0;
+      border: 1px solid var(--border);
+      border-radius: 8px;
+    }
+
+    table {
+      width: 100%;
+      border-collapse: collapse;
+      font-size: 13px;
+      text-align: left;
+      white-space: nowrap;
+    }
+
+    th {
+      background-color: var(--table-header);
+      color: var(--text);
+      font-weight: 700;
+      font-family: 'JetBrains Mono', ui-monospace, monospace;
+      font-size: 11px;
+      letter-spacing: 0.04em;
+      text-transform: uppercase;
+      padding: 10px 12px;
+      border-bottom: 1px solid var(--border);
+    }
+
+    td {
+      padding: 9px 12px;
+      border-bottom: 1px solid var(--border);
+      color: var(--text-muted);
+    }
+
+    tr:last-child td {
+      border-bottom: none;
+    }
+
+    tr:nth-child(even) td {
+      background-color: var(--table-row-alt);
+    }
+
+    /* SVG DIAGRAMS / FIGURES */
+    .svg-container {
+      width: 100%;
+      max-width: 100%;
+      margin: 14px 0;
+      padding: 12px;
+      background: #15151a;
+      border: 1px solid var(--border);
+      border-radius: 8px;
+      display: flex;
+      justify-content: center;
+      align-items: center;
+      overflow-x: auto;
+      -webkit-overflow-scrolling: touch;
+    }
+
+    .svg-container svg {
+      max-width: 100%;
+      height: auto;
+      display: block;
+    }
+
+    /* IMAGES / DIAGRAMS */
+    .gallery {
+      display: grid;
+      grid-template-columns: repeat(auto-fill, minmax(130px, 1fr));
+      gap: 10px;
+      margin: 14px 0;
+    }
+
+    .gallery-item {
+      position: relative;
+      border: 1px solid var(--border);
+      border-radius: 8px;
+      overflow: hidden;
+      background: #000;
+      aspect-ratio: 4 / 3;
+      cursor: pointer;
+      transition: transform 0.2s ease, border-color 0.2s ease;
+    }
+
+    .gallery-item:hover {
+      border-color: var(--border-focus);
+    }
+
+    .gallery-item:active {
+      transform: scale(0.97);
+    }
+
+    .gallery-item img {
+      width: 100%;
+      height: 100%;
+      object-fit: cover;
+      display: block;
+    }
+
+    .gallery-caption {
+      position: absolute;
+      bottom: 0;
+      left: 0;
+      right: 0;
+      background: rgba(18, 18, 21, 0.85);
+      color: #fff;
+      font-size: 10px;
+      font-family: 'JetBrains Mono', monospace;
+      padding: 4px 6px;
+      white-space: nowrap;
+      overflow: hidden;
+      text-overflow: ellipsis;
+    }
+
+    /* CARD FOOTER */
+    .card-footer {
+      display: flex;
+      justify-content: flex-end;
+      gap: 8px;
+      margin-top: 14px;
+      padding-top: 10px;
+      border-top: 1px dashed var(--border);
+    }
+
+    .btn-action {
+      background: var(--card-bg);
+      border: 1px solid var(--border);
+      color: var(--text-muted);
+      font-size: 11.5px;
+      font-family: 'Nunito', sans-serif;
+      font-weight: 700;
+      letter-spacing: 0.02em;
+      padding: 6px 12px;
+      border-radius: 6px;
+      cursor: pointer;
+      display: inline-flex;
+      align-items: center;
+      gap: 6px;
+      transition: all 0.2s cubic-bezier(0.16, 1, 0.3, 1);
+    }
+
+    .btn-action:hover {
+      border-color: var(--border-focus);
+      color: var(--text);
+    }
+
+    .btn-action:active {
+      transform: scale(0.96);
+      background: var(--text);
+      color: var(--bg);
+    }
+
+    .btn-action.copied {
+      background: #ffffff;
+      color: #121215;
+      border-color: #ffffff;
+    }
+
+    /* LIGHTBOX MODAL */
+    .lightbox {
+      display: none;
+      position: fixed;
+      inset: 0;
+      background: rgba(14, 14, 18, 0.95);
+      z-index: 9999;
+      justify-content: center;
+      align-items: center;
+      padding: 16px;
+      backdrop-filter: blur(4px);
+    }
+
+    .lightbox.active {
+      display: flex;
+      animation: fadeInContent 0.2s ease-out;
+    }
+
+    .lightbox-img {
+      max-width: 100%;
+      max-height: 90vh;
+      object-fit: contain;
+      border: 1px solid var(--border);
+      border-radius: 8px;
+    }
+
+    .lightbox-close {
+      position: absolute;
+      top: 16px;
+      right: 16px;
+      background: var(--card-bg);
+      border: 1px solid var(--border);
+      color: var(--text);
+      font-size: 12px;
+      font-family: 'Nunito', sans-serif;
+      font-weight: 700;
+      padding: 8px 14px;
+      border-radius: 8px;
+      cursor: pointer;
+      transition: all 0.2s ease;
+    }
+
+    .lightbox-close:hover {
+      border-color: var(--border-focus);
+    }
+
+    /* FOOTER */
+    .footer {
+      margin-top: 30px;
+      text-align: center;
+      font-size: 11.5px;
+      color: var(--text-dim);
+      font-family: 'JetBrains Mono', ui-monospace, monospace;
+    }
+  </style>
+</head>
+<body>
+
+  <!-- HEADER -->
+  <header class="header">
+    <div class="header-top">
+      <span class="app-title">МЭШ Дневник</span>
+      <span class="header-counter">{{items_count}} заданий</span>
+    </div>
+    <div class="header-date">{{date_title}}</div>
+    <div class="meta-bar">
+      <span class="meta-item">Сгенерировано: {{generated_time}}</span>
+      <span class="meta-dot"></span>
+      <span class="meta-item">7 класс</span>
+    </div>
+  </header>
+
+  <!-- QUICK CONTROLS -->
+  <div class="controls">
+    <button class="btn-ctrl" onclick="toggleAllCards(true)">Развернуть всё</button>
+    <button class="btn-ctrl" onclick="toggleAllCards(false)">Свернуть всё</button>
+  </div>
+
+  <!-- SUBJECT CARDS -->
+  <main class="subject-list">
+
+    <!-- TEMPLATE LOOP / ITEMS START -->
+    {{#subjects}}
+    <details class="subject-card" id="card-{{id}}" {{#open}}open{{/open}}>
+      <summary class="subject-summary">
+        <div class="subject-meta">
+          <div class="subject-header-row">
+            <span class="subject-title">{{name}}</span>
+            {{#is_cdz}}
+            <span class="badge-cdz">ЦДЗ</span>
+            {{/is_cdz}}
+          </div>
+          <div class="subject-preview">{{preview_text}}</div>
+        </div>
+        <svg class="chevron" viewBox="0 0 24 24">
+          <polyline points="6 9 12 15 18 9"></polyline>
+        </svg>
+      </summary>
+
+      <div class="subject-content">
+        {{#has_task}}
+        <div class="task-box">
+          <div class="task-label">Задание учителя</div>
+          <div class="task-text">{{task_text}}</div>
+        </div>
+        {{/has_task}}
+
+        <div class="solution-body" id="solution-{{id}}">
+          {{{solution_html}}}
+        </div>
+
+        {{#has_images}}
+        <div class="gallery">
+          {{#images}}
+          <div class="gallery-item" onclick="openLightbox('{{src}}')">
+            <img src="{{src}}" alt="{{alt}}" loading="lazy">
+            {{#caption}}<div class="gallery-caption">{{caption}}</div>{{/caption}}
+          </div>
+          {{/images}}
+        </div>
+        {{/has_images}}
+
+        <div class="card-footer">
+          <button class="btn-action" onclick="copySolution('{{id}}', this)">
+            <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+              <rect x="9" y="9" width="13" height="13" rx="2" ry="2"></rect>
+              <path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"></path>
+            </svg>
+            <span>Копировать</span>
+          </button>
+        </div>
+      </div>
+    </details>
+    {{/subjects}}
+    <!-- ITEMS END -->
+
+  </main>
+
+  <footer class="footer">
+    MESH Homework Solver • Автономный экспорт
+  </footer>
+
+  <!-- LIGHTBOX -->
+  <div class="lightbox" id="lightbox" onclick="closeLightbox(event)">
+    <button class="lightbox-close" onclick="closeLightbox()">Закрыть</button>
+    <img class="lightbox-img" id="lightbox-img" src="" alt="Full view">
+  </div>
+
+  <script>
+    function toggleAllCards(open) {
+      document.querySelectorAll('.subject-card').forEach(card => {
+        card.open = open;
+      });
+    }
+
+    function copySolution(id, btn) {
+      const el = document.getElementById('solution-' + id);
+      if (!el) return;
+      
+      const text = el.innerText;
+      navigator.clipboard.writeText(text).then(() => {
+        const span = btn.querySelector('span');
+        const orig = span.textContent;
+        span.textContent = 'Скопировано';
+        btn.classList.add('copied');
+        setTimeout(() => {
+          span.textContent = orig;
+          btn.classList.remove('copied');
+        }, 1800);
+      }).catch(err => {
+        console.error('Copy failed', err);
+      });
+    }
+
+    function openLightbox(src) {
+      const box = document.getElementById('lightbox');
+      const img = document.getElementById('lightbox-img');
+      img.src = src;
+      box.classList.add('active');
+    }
+
+    function closeLightbox(e) {
+      if (!e || e.target.id === 'lightbox' || e.target.classList.contains('lightbox-close')) {
+        document.getElementById('lightbox').classList.remove('active');
+        document.getElementById('lightbox-img').src = '';
+      }
+    }
+
+    document.addEventListener('keydown', (e) => {
+      if (e.key === 'Escape') closeLightbox();
+    });
+  </script>
+</body>
+</html>

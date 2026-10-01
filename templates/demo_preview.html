@@ -1,0 +1,763 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=5.0, user-scalable=yes">
+  <title>Домашнее задание — Четверг, 1 октября</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Nunito:wght@400;500;600;700;800&family=JetBrains+Mono:wght@400;500;600;700&display=swap" rel="stylesheet">
+  <style>
+    :root {
+      --bg: #121215;
+      --card-bg: #1a1a20;
+      --card-hover: #22222a;
+      --card-open: #1d1d24;
+      --border: #2a2a35;
+      --border-focus: #424252;
+      --text: #ececf2;
+      --text-muted: #9c9cae;
+      --text-dim: #6c6c7e;
+      --badge-cdz-bg: #282834;
+      --badge-cdz-text: #dedee8;
+      --badge-cdz-border: #3e3e50;
+      --code-bg: #151519;
+      --task-bg: #16161c;
+      --answer-bg: #15151a;
+      --answer-border: #3a3a4a;
+      --table-header: #212129;
+      --table-row-alt: #16161b;
+      --btn-active: #2a2a36;
+    }
+
+    * {
+      box-sizing: border-box;
+      margin: 0;
+      padding: 0;
+      -webkit-tap-highlight-color: transparent;
+    }
+
+    body {
+      background-color: var(--bg);
+      color: var(--text);
+      font-family: 'Nunito', -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+      font-size: 15.5px;
+      line-height: 1.6;
+      padding: 18px 14px 48px;
+      max-width: 640px;
+      margin: 0 auto;
+      text-rendering: optimizeLegibility;
+      -webkit-font-smoothing: antialiased;
+    }
+
+    /* HEADER */
+    .header {
+      padding: 10px 4px 18px;
+      border-bottom: 1px solid var(--border);
+      margin-bottom: 16px;
+    }
+
+    .header-top {
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      margin-bottom: 6px;
+    }
+
+    .app-title {
+      font-size: 11px;
+      letter-spacing: 0.12em;
+      text-transform: uppercase;
+      font-weight: 700;
+      color: var(--text-dim);
+      font-family: 'JetBrains Mono', ui-monospace, monospace;
+    }
+
+    .header-counter {
+      font-size: 11px;
+      letter-spacing: 0.08em;
+      text-transform: uppercase;
+      font-weight: 700;
+      color: var(--text-muted);
+      font-family: 'JetBrains Mono', ui-monospace, monospace;
+      background: var(--card-bg);
+      padding: 3px 8px;
+      border-radius: 4px;
+      border: 1px solid var(--border);
+    }
+
+    .header-date {
+      font-size: 22px;
+      font-weight: 800;
+      letter-spacing: -0.02em;
+      color: var(--text);
+      text-transform: capitalize;
+    }
+
+    .meta-bar {
+      display: flex;
+      gap: 12px;
+      font-size: 12px;
+      color: var(--text-muted);
+      font-family: 'JetBrains Mono', ui-monospace, monospace;
+      margin-top: 5px;
+    }
+
+    .meta-item {
+      display: inline-flex;
+      align-items: center;
+      gap: 5px;
+    }
+
+    .meta-dot {
+      width: 4px;
+      height: 4px;
+      background-color: var(--text-dim);
+      border-radius: 50%;
+    }
+
+    /* CONTROLS */
+    .controls {
+      display: flex;
+      gap: 8px;
+      margin-bottom: 16px;
+    }
+
+    .btn-ctrl {
+      flex: 1;
+      background: var(--card-bg);
+      border: 1px solid var(--border);
+      color: var(--text-muted);
+      font-size: 11.5px;
+      font-family: 'Nunito', sans-serif;
+      font-weight: 700;
+      letter-spacing: 0.04em;
+      text-transform: uppercase;
+      padding: 8px 10px;
+      border-radius: 8px;
+      cursor: pointer;
+      transition: all 0.2s cubic-bezier(0.16, 1, 0.3, 1);
+    }
+
+    .btn-ctrl:active {
+      transform: scale(0.98);
+      background: var(--btn-active);
+      color: var(--text);
+      border-color: var(--border-focus);
+    }
+
+    /* SUBJECT CARD (ACCORDION) */
+    .subject-list {
+      display: flex;
+      flex-direction: column;
+      gap: 12px;
+    }
+
+    .subject-card {
+      background-color: var(--card-bg);
+      border: 1px solid var(--border);
+      border-radius: 10px;
+      overflow: hidden;
+      transition: all 0.25s cubic-bezier(0.16, 1, 0.3, 1);
+    }
+
+    .subject-card[open] {
+      background-color: var(--card-open);
+      border-color: var(--border-focus);
+    }
+
+    .subject-summary {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      padding: 14px 15px;
+      cursor: pointer;
+      user-select: none;
+      list-style: none;
+      gap: 12px;
+      transition: background-color 0.2s ease;
+    }
+
+    .subject-summary:hover {
+      background-color: var(--card-hover);
+    }
+
+    .subject-summary::-webkit-details-marker {
+      display: none;
+    }
+
+    .subject-meta {
+      flex: 1;
+      min-width: 0;
+    }
+
+    .subject-header-row {
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      margin-bottom: 3px;
+    }
+
+    .subject-title {
+      font-size: 17px;
+      font-weight: 800;
+      color: var(--text);
+      letter-spacing: -0.01em;
+      white-space: nowrap;
+      overflow: hidden;
+      text-overflow: ellipsis;
+    }
+
+    .badge-cdz {
+      font-size: 10.5px;
+      font-weight: 700;
+      letter-spacing: 0.06em;
+      text-transform: uppercase;
+      padding: 2px 7px;
+      border-radius: 4px;
+      font-family: 'JetBrains Mono', ui-monospace, monospace;
+      flex-shrink: 0;
+      background-color: var(--badge-cdz-bg);
+      color: var(--badge-cdz-text);
+      border: 1px solid var(--badge-cdz-border);
+    }
+
+    .subject-preview {
+      font-size: 12.5px;
+      color: var(--text-dim);
+      white-space: nowrap;
+      overflow: hidden;
+      text-overflow: ellipsis;
+      font-family: 'Nunito', sans-serif;
+    }
+
+    .chevron {
+      width: 18px;
+      height: 18px;
+      flex-shrink: 0;
+      stroke: var(--text-muted);
+      stroke-width: 2.2;
+      stroke-linecap: round;
+      stroke-linejoin: round;
+      fill: none;
+      transition: transform 0.25s cubic-bezier(0.16, 1, 0.3, 1), stroke 0.2s ease;
+    }
+
+    .subject-card[open] .chevron {
+      transform: rotate(180deg);
+      stroke: var(--text);
+    }
+
+    /* CARD CONTENT */
+    .subject-content {
+      padding: 0 15px 16px;
+      border-top: 1px solid var(--border);
+      animation: fadeInContent 0.25s ease-out;
+    }
+
+    @keyframes fadeInContent {
+      from {
+        opacity: 0;
+        transform: translateY(-4px);
+      }
+      to {
+        opacity: 1;
+        transform: translateY(0);
+      }
+    }
+
+    /* TASK ASSIGNMENT BLOCK */
+    .task-box {
+      margin-top: 14px;
+      padding: 10px 13px;
+      background: var(--task-bg);
+      border-left: 3px solid var(--text-dim);
+      border-radius: 0 6px 6px 0;
+      font-size: 13.5px;
+    }
+
+    .task-label {
+      font-size: 10.5px;
+      font-family: 'JetBrains Mono', ui-monospace, monospace;
+      text-transform: uppercase;
+      letter-spacing: 0.08em;
+      color: var(--text-dim);
+      font-weight: 700;
+      margin-bottom: 4px;
+    }
+
+    .task-text {
+      color: var(--text-muted);
+      white-space: pre-wrap;
+      word-break: break-word;
+      line-height: 1.5;
+    }
+
+    /* SOLUTION BODY */
+    .solution-body {
+      margin-top: 16px;
+      font-size: 14.5px;
+      color: var(--text);
+    }
+
+    .solution-body h3, 
+    .solution-body h4 {
+      font-size: 15px;
+      font-weight: 700;
+      margin: 16px 0 8px;
+      letter-spacing: -0.01em;
+      color: var(--text);
+      border-bottom: 1px solid var(--border);
+      padding-bottom: 4px;
+    }
+
+    .solution-body p {
+      margin-bottom: 10px;
+    }
+
+    .solution-body ul, 
+    .solution-body ol {
+      margin: 8px 0 12px 20px;
+    }
+
+    .solution-body li {
+      margin-bottom: 4px;
+    }
+
+    .solution-body strong {
+      color: #ffffff;
+      font-weight: 700;
+    }
+
+    .solution-body code {
+      font-family: 'JetBrains Mono', ui-monospace, monospace;
+      font-size: 13px;
+      background: var(--code-bg);
+      padding: 2px 5px;
+      border-radius: 4px;
+      border: 1px solid var(--border);
+    }
+
+    .solution-body hr {
+      border: none;
+      border-top: 1px solid var(--border);
+      margin: 16px 0;
+    }
+
+    /* ANSWER CALLOUT */
+    .answer-box {
+      margin: 14px 0;
+      padding: 11px 13px;
+      background: var(--answer-bg);
+      border: 1px solid var(--answer-border);
+      border-radius: 8px;
+      font-size: 13.5px;
+      color: #ffffff;
+      line-height: 1.5;
+    }
+
+    .answer-box strong {
+      color: #ffffff;
+      letter-spacing: 0.02em;
+    }
+
+    /* TABLE */
+    .table-container {
+      width: 100%;
+      overflow-x: auto;
+      -webkit-overflow-scrolling: touch;
+      margin: 14px 0;
+      border: 1px solid var(--border);
+      border-radius: 8px;
+    }
+
+    table {
+      width: 100%;
+      border-collapse: collapse;
+      font-size: 13px;
+      text-align: left;
+      white-space: nowrap;
+    }
+
+    th {
+      background-color: var(--table-header);
+      color: var(--text);
+      font-weight: 700;
+      font-family: 'JetBrains Mono', ui-monospace, monospace;
+      font-size: 11px;
+      letter-spacing: 0.04em;
+      text-transform: uppercase;
+      padding: 10px 12px;
+      border-bottom: 1px solid var(--border);
+    }
+
+    td {
+      padding: 9px 12px;
+      border-bottom: 1px solid var(--border);
+      color: var(--text-muted);
+    }
+
+    tr:last-child td {
+      border-bottom: none;
+    }
+
+    tr:nth-child(even) td {
+      background-color: var(--table-row-alt);
+    }
+
+    /* CARD FOOTER */
+    .card-footer {
+      display: flex;
+      justify-content: flex-end;
+      gap: 8px;
+      margin-top: 14px;
+      padding-top: 10px;
+      border-top: 1px dashed var(--border);
+    }
+
+    .btn-action {
+      background: var(--card-bg);
+      border: 1px solid var(--border);
+      color: var(--text-muted);
+      font-size: 11.5px;
+      font-family: 'Nunito', sans-serif;
+      font-weight: 700;
+      letter-spacing: 0.02em;
+      padding: 6px 12px;
+      border-radius: 6px;
+      cursor: pointer;
+      display: inline-flex;
+      align-items: center;
+      gap: 6px;
+      transition: all 0.2s cubic-bezier(0.16, 1, 0.3, 1);
+    }
+
+    .btn-action:hover {
+      border-color: var(--border-focus);
+      color: var(--text);
+    }
+
+    .btn-action:active {
+      transform: scale(0.96);
+      background: var(--text);
+      color: var(--bg);
+    }
+
+    .btn-action.copied {
+      background: #ffffff;
+      color: #121215;
+      border-color: #ffffff;
+    }
+
+    /* FOOTER */
+    .footer {
+      margin-top: 30px;
+      text-align: center;
+      font-size: 11.5px;
+      color: var(--text-dim);
+      font-family: 'JetBrains Mono', ui-monospace, monospace;
+    }
+  </style>
+</head>
+<body>
+
+  <!-- HEADER -->
+  <header class="header">
+    <div class="header-top">
+      <span class="app-title">МЭШ Дневник</span>
+      <span class="header-counter">4 задания</span>
+    </div>
+    <div class="header-date">Четверг, 1 октября</div>
+    <div class="meta-bar">
+      <span class="meta-item">Сгенерировано: 03:45</span>
+      <span class="meta-dot"></span>
+      <span class="meta-item">7 класс</span>
+    </div>
+  </header>
+
+  <!-- QUICK CONTROLS -->
+  <div class="controls">
+    <button class="btn-ctrl" onclick="toggleAllCards(true)">Развернуть всё</button>
+    <button class="btn-ctrl" onclick="toggleAllCards(false)">Свернуть всё</button>
+  </div>
+
+  <!-- SUBJECT CARDS -->
+  <main class="subject-list">
+
+    <!-- 1. ГЕОГРАФИЯ (БЕЗ ПЛАШКИ 'РЕШЕНО', ЧИСТЫЙ СТИЛЬ) -->
+    <details class="subject-card" id="card-geo" open>
+      <summary class="subject-summary">
+        <div class="subject-meta">
+          <div class="subject-header-row">
+            <span class="subject-title">География</span>
+          </div>
+          <div class="subject-preview">Амплитуда температур (Мумбаи, Якутск, Нью-Йорк, Париж)</div>
+        </div>
+        <svg class="chevron" viewBox="0 0 24 24">
+          <polyline points="6 9 12 15 18 9"></polyline>
+        </svg>
+      </summary>
+
+      <div class="subject-content">
+        <div class="task-box">
+          <div class="task-label">Задание учителя</div>
+          <div class="task-text">В тетради определить годовую амплитуду для городов: Мумбаи, Якутск, Нью-Йорк, Париж.</div>
+        </div>
+
+        <div class="solution-body" id="solution-geo">
+          <p><strong>Формула:</strong> Годовая амплитуда температуры вычисляется как разность между средней температурой самого тёплого месяца и самого холодного месяца:<br><code>A = T_max - T_min</code></p>
+
+          <div class="table-container">
+            <table>
+              <thead>
+                <tr>
+                  <th>Город</th>
+                  <th>Климатический пояс</th>
+                  <th>Тёплый месяц</th>
+                  <th>Холодный месяц</th>
+                  <th>Амплитуда (A)</th>
+                </tr>
+              </thead>
+              <tbody>
+                <tr>
+                  <td><strong>Мумбаи</strong></td>
+                  <td>Субэкваториальный</td>
+                  <td>Май (+30 °C)</td>
+                  <td>Январь (+24 °C)</td>
+                  <td><strong>6 °C</strong></td>
+                </tr>
+                <tr>
+                  <td><strong>Якутск</strong></td>
+                  <td>Резко континентальный</td>
+                  <td>Июль (+19 °C)</td>
+                  <td>Январь (-43 °C)</td>
+                  <td><strong>62 °C</strong></td>
+                </tr>
+                <tr>
+                  <td><strong>Нью-Йорк</strong></td>
+                  <td>Умеренно континентальный</td>
+                  <td>Июль (+25 °C)</td>
+                  <td>Январь (0 °C)</td>
+                  <td><strong>25 °C</strong></td>
+                </tr>
+                <tr>
+                  <td><strong>Париж</strong></td>
+                  <td>Умеренный морской</td>
+                  <td>Июль (+19 °C)</td>
+                  <td>Январь (+3 °C)</td>
+                  <td><strong>16 °C</strong></td>
+                </tr>
+              </tbody>
+            </table>
+          </div>
+
+          <p><strong>Вывод:</strong> Наименьшая амплитуда зафиксирована в Мумбаи (6 °C) благодаря океаническому влиянию низких широт. Наибольшая — в Якутске (62 °C), что отражает предельную континентальность климата Евразии.</p>
+
+          <div class="answer-box">
+            <strong>Ответ:</strong> Мумбаи — 6 °C; Якутск — 62 °C; Нью-Йорк — 25 °C; Париж — 16 °C.
+          </div>
+        </div>
+
+        <div class="card-footer">
+          <button class="btn-action" onclick="copySolution('geo', this)">
+            <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+              <rect x="9" y="9" width="13" height="13" rx="2" ry="2"></rect>
+              <path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"></path>
+            </svg>
+            <span>Копировать</span>
+          </button>
+        </div>
+      </div>
+    </details>
+
+    <!-- 2. ФИЗИКА (БЕЗ ПЛАШКИ 'РЕШЕНО') -->
+    <details class="subject-card" id="card-phys">
+      <summary class="subject-summary">
+        <div class="subject-meta">
+          <div class="subject-header-row">
+            <span class="subject-title">Физика</span>
+          </div>
+          <div class="subject-preview">Перышкин п. 14, 15 + Лукашик № 98, 99</div>
+        </div>
+        <svg class="chevron" viewBox="0 0 24 24">
+          <polyline points="6 9 12 15 18 9"></polyline>
+        </svg>
+      </summary>
+
+      <div class="subject-content">
+        <div class="task-box">
+          <div class="task-label">Задание учителя</div>
+          <div class="task-text">Перышкин: конспект параграфов 14 и 15. Лукашик: задачи № 98, 99.</div>
+        </div>
+
+        <div class="solution-body" id="solution-phys">
+          <h3>Конспект (Перышкин А. В.)</h3>
+          <p><strong>§14. Различие в строении твёрдых тел, жидкостей и газов:</strong> Свойства определяются расстоянием между молекулами и характером их движения. В газах расстояния велики (нет формы и объёма), в жидкостях молекулы плотно упакованы и текучи (сохраняют объём, меняют форму), в твёрдых телах — кристаллическая решётка с колебаниями около равновесия (сохраняют объём и форму).</p>
+          <p><strong>§15. Механическое движение:</strong> Изменение положения тела относительно других тел с течением времени. Линия движения — траектория, длина траектории — пройденный путь <em>s</em> (в СИ: метры).</p>
+
+          <hr>
+
+          <h3>Лукашик № 98</h3>
+          <p><strong>Условие:</strong> Какова траектория точек обода колеса относительно рамы велосипеда?<br>
+          <strong>Решение:</strong> Центр колеса неподвижен относительно рамы. При вращении все точки обода находятся на фиксированном радиусе <em>R</em> от оси, образуя замкнутую круговую линию.</p>
+          <div class="answer-box">
+            <strong>Ответ:</strong> Окружность.
+          </div>
+
+          <h3>Лукашик № 99</h3>
+          <p><strong>Условие:</strong> Прямолинейные и криволинейные траектории частей велосипеда относительно дороги.<br>
+          <strong>Решение:</strong> Детали, движущиеся только поступательно параллельно дороге, имеют прямолинейную траекторию. Вращающиеся части описывают в пространстве циклоиды и дуги.</p>
+          <div class="answer-box">
+            <strong>Ответ:</strong> Прямолинейные: рама, руль, седло, оси колёс. Криволинейные: ободья, спицы, шины, педали, цепь.
+          </div>
+        </div>
+
+        <div class="card-footer">
+          <button class="btn-action" onclick="copySolution('phys', this)">
+            <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+              <rect x="9" y="9" width="13" height="13" rx="2" ry="2"></rect>
+              <path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"></path>
+            </svg>
+            <span>Копировать</span>
+          </button>
+        </div>
+      </div>
+    </details>
+
+    <!-- 3. АНГЛИЙСКИЙ ЯЗЫК -->
+    <details class="subject-card" id="card-eng">
+      <summary class="subject-summary">
+        <div class="subject-meta">
+          <div class="subject-header-row">
+            <span class="subject-title">Английский язык</span>
+          </div>
+          <div class="subject-preview">Starlight 7, стр. 13, № 2b (Диалог) + ЦДЗ</div>
+        </div>
+        <svg class="chevron" viewBox="0 0 24 24">
+          <polyline points="6 9 12 15 18 9"></polyline>
+        </svg>
+      </summary>
+
+      <div class="subject-content">
+        <div class="task-box">
+          <div class="task-label">Задание учителя</div>
+          <div class="task-text">Starlight 7: p. 13, ex. 2b (наизусть диалог). ЦДЗ на МЭШ.</div>
+        </div>
+
+        <div class="solution-body" id="solution-eng">
+          <h3>Диалог (Interview)</h3>
+          <p>
+            <strong>Simon:</strong> Good morning. I'm Simon Jones.<br>
+            <strong>Mr Andrews:</strong> Nice to meet you, Simon. Please have a seat.<br>
+            <strong>Simon:</strong> Thank you.<br>
+            <strong>Mr Andrews:</strong> So, Simon, tell me a little about yourself.<br>
+            <strong>Simon:</strong> Well, I'm 18 years old, I'm a student, and I'm looking for a part-time job to help pay for university.<br>
+            <strong>Mr Andrews:</strong> I see. Why do you think you'll be a good shop assistant?<br>
+            <strong>Simon:</strong> Well, I think I'm hard-working and honest. People also say I'm friendly and helpful.<br>
+            <strong>Mr Andrews:</strong> Do you have any experience in this type of work?<br>
+            <strong>Simon:</strong> Yes. I worked in a surf shop last summer. Here's a letter of recommendation.<br>
+            <strong>Mr Andrews:</strong> Oh, that's great! If we offer you the job, when can you start?<br>
+            <strong>Simon:</strong> I can start immediately.<br>
+            <strong>Mr Andrews:</strong> OK, Simon, I think that's all I need to know. I'll be in touch.<br>
+            <strong>Simon:</strong> Thank you very much for your time.
+          </p>
+
+          <hr>
+
+          <h3>Перевод на русский</h3>
+          <p>
+            <strong>Саймон:</strong> Доброе утро. Я Саймон Джонс.<br>
+            <strong>Мистер Эндрюс:</strong> Приятно познакомиться, Саймон. Садитесь, пожалуйста.<br>
+            <strong>Саймон:</strong> Спасибо.<br>
+            <strong>Мистер Эндрюс:</strong> Итак, Саймон, расскажите немного о себе.<br>
+            <strong>Саймон:</strong> Мне 18 лет, я студент и ищу подработку, чтобы оплатить учёбу в университете.<br>
+            <strong>Мистер Эндрюс:</strong> Понятно. Почему вы думаете, что будете хорошим продавцом?<br>
+            <strong>Саймон:</strong> Я трудолюбивый и честный. Люди также отмечают мою доброжелательность и отзывчивость.<br>
+            <strong>Мистер Эндрюс:</strong> Есть ли опыт подобной работы?<br>
+            <strong>Саймон:</strong> Да, прошлым летом я работал в магазине сёрфинга. Вот рекомендательное письмо.<br>
+            <strong>Мистер Эндрюс:</strong> Замечательно. Если мы предложим место, когда сможете приступить?<br>
+            <strong>Саймон:</strong> Могу начать немедленно.<br>
+            <strong>Мистер Эндрюс:</strong> Хорошо, Саймон. Это всё, что мне нужно знать. Я свяжусь с вами.<br>
+            <strong>Саймон:</strong> Большое спасибо за уделенное время.
+          </p>
+
+          <div class="answer-box">
+            <strong>Ответ:</strong> Диалог готов к заучиванию. ЦДЗ выполняется непосредственно в личном кабинете дневника МЭШ.
+          </div>
+        </div>
+
+        <div class="card-footer">
+          <button class="btn-action" onclick="copySolution('eng', this)">
+            <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+              <rect x="9" y="9" width="13" height="13" rx="2" ry="2"></rect>
+              <path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"></path>
+            </svg>
+            <span>Копировать</span>
+          </button>
+        </div>
+      </div>
+    </details>
+
+    <!-- 4. РУССКИЙ ЯЗЫК (ТОЛЬКО ФЛАГ ЦДЗ) -->
+    <details class="subject-card" id="card-rus">
+      <summary class="subject-summary">
+        <div class="subject-meta">
+          <div class="subject-header-row">
+            <span class="subject-title">Русский язык</span>
+            <span class="badge-cdz">ЦДЗ</span>
+          </div>
+          <div class="subject-preview">Интерактивный тест в системе МЭШ</div>
+        </div>
+        <svg class="chevron" viewBox="0 0 24 24">
+          <polyline points="6 9 12 15 18 9"></polyline>
+        </svg>
+      </summary>
+
+      <div class="subject-content">
+        <div class="task-box">
+          <div class="task-label">Задание учителя</div>
+          <div class="task-text">Выполнить тест ЦДЗ по теме «Причастие и причастный оборот» в дневнике МЭШ.</div>
+        </div>
+
+        <div class="solution-body" id="solution-rus">
+          <div class="answer-box">
+            <strong>Ответ:</strong> Выполняется в электронном виде на портале school.mos.ru.
+          </div>
+        </div>
+      </div>
+    </details>
+
+  </main>
+
+  <footer class="footer">
+    MESH Homework Solver • Автономный экспорт
+  </footer>
+
+  <script>
+    function toggleAllCards(open) {
+      document.querySelectorAll('.subject-card').forEach(card => {
+        card.open = open;
+      });
+    }
+
+    function copySolution(id, btn) {
+      const el = document.getElementById('solution-' + id);
+      if (!el) return;
+      
+      const text = el.innerText;
+      navigator.clipboard.writeText(text).then(() => {
+        const span = btn.querySelector('span');
+        const orig = span.textContent;
+        span.textContent = 'Скопировано';
+        btn.classList.add('copied');
+        setTimeout(() => {
+          span.textContent = orig;
+          btn.classList.remove('copied');
+        }, 1800);
+      }).catch(err => {
+        console.error('Copy failed', err);
+      });
+    }
+  </script>
+</body>
+</html>
