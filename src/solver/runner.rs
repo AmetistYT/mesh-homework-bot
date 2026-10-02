@@ -109,17 +109,30 @@ impl SolverRunner {
         cmd.arg("--dangerously-skip-permissions")
             .arg("--model")
             .arg(model)
-            .arg("-p")
-            .arg(prompt)
             .env("LANG", "en_US.UTF-8")
             .env("LC_ALL", "en_US.UTF-8")
             .current_dir(&run_dir)
-            .stdin(std::process::Stdio::null())
+            .stdin(std::process::Stdio::piped())
+            .stdout(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::piped())
             .kill_on_drop(true);
 
-        let output = cmd.output()
+        let mut child = cmd.spawn()
+            .with_context(|| format!("Не удалось запустить локальный agy бинарник '{}' (cwd: '{}')", bin_path, run_dir.display()))?;
+
+        if let Some(mut stdin) = child.stdin.take() {
+            let prompt_bytes = prompt.as_bytes().to_vec();
+            tokio::spawn(async move {
+                use tokio::io::AsyncWriteExt;
+                let _ = stdin.write_all(&prompt_bytes).await;
+                let _ = stdin.flush().await;
+                drop(stdin);
+            });
+        }
+
+        let output = child.wait_with_output()
             .await
-            .context(format!("Не удалось запустить локальный agy бинарник '{}' (cwd: '{}')", bin_path, run_dir.display()))?;
+            .context("Ошибка ожидания завершения agy процесса")?;
 
         if !output.status.success() {
             let stderr = String::from_utf8_lossy(&output.stderr);
@@ -134,22 +147,68 @@ impl SolverRunner {
         let solution = String::from_utf8_lossy(&output.stdout).to_string();
         let ansi_cleaned = Self::strip_ansi(&solution);
         let latex_cleaned = crate::solver::latex::clean_latex(&ansi_cleaned);
-        Ok(latex_cleaned)
+        let chat_cleaned = crate::solver::humanizer::Humanizer::clean_chat_reply(&latex_cleaned);
+        Ok(chat_cleaned)
     }
 
-    fn strip_ansi(raw: &str) -> String {
+    pub fn strip_ansi(raw: &str) -> String {
         let mut cleaned = String::new();
-        let mut in_escape = false;
+        let chars: Vec<char> = raw.chars().collect();
+        let len = chars.len();
+        let mut i = 0;
 
-        for c in raw.chars() {
-            if c == '\x1b' {
-                in_escape = true;
-            } else if in_escape {
-                if c == 'm' || c == 'K' || c == 'H' || c == 'J' {
-                    in_escape = false;
+        while i < len {
+            if chars[i] == '\x1b' {
+                i += 1;
+                if i >= len {
+                    break;
+                }
+                match chars[i] {
+                    '[' => {
+                        // CSI последовательность: \x1b[ ... [A-Za-z]
+                        i += 1;
+                        while i < len {
+                            let c = chars[i];
+                            if c.is_ascii_alphabetic() || c == '@' || c == '`' || c == '~' {
+                                i += 1;
+                                break;
+                            } else if (c as u32) >= 0x20 && (c as u32) <= 0x3F {
+                                i += 1;
+                            } else {
+                                break;
+                            }
+                        }
+                    }
+                    ']' => {
+                        // OSC последовательность: \x1b] ... (\x07 или \x1b\)
+                        i += 1;
+                        while i < len {
+                            if chars[i] == '\x07' {
+                                i += 1;
+                                break;
+                            } else if chars[i] == '\x1b' && i + 1 < len && chars[i + 1] == '\\' {
+                                i += 2;
+                                break;
+                            }
+                            i += 1;
+                        }
+                    }
+                    '(' | ')' => {
+                        i += 1;
+                        if i < len {
+                            i += 1;
+                        }
+                    }
+                    c if (c as u32) >= 0x40 && (c as u32) <= 0x5F => {
+                        i += 1;
+                    }
+                    _ => {
+                        i += 1;
+                    }
                 }
             } else {
-                cleaned.push(c);
+                cleaned.push(chars[i]);
+                i += 1;
             }
         }
         cleaned.trim().to_string()
@@ -176,17 +235,30 @@ impl SolverRunner {
         cmd.arg("--dangerously-skip-permissions")
             .arg("--model")
             .arg(model)
-            .arg("-p")
-            .arg(prompt)
             .env("LANG", "en_US.UTF-8")
             .env("LC_ALL", "en_US.UTF-8")
             .current_dir(&run_dir)
-            .stdin(std::process::Stdio::null())
+            .stdin(std::process::Stdio::piped())
+            .stdout(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::piped())
             .kill_on_drop(true);
 
-        let output = cmd.output()
+        let mut child = cmd.spawn()
+            .with_context(|| format!("Не удалось запустить локальный agy бинарник '{}' (cwd: '{}')", bin_path, run_dir.display()))?;
+
+        if let Some(mut stdin) = child.stdin.take() {
+            let prompt_bytes = prompt.as_bytes().to_vec();
+            tokio::spawn(async move {
+                use tokio::io::AsyncWriteExt;
+                let _ = stdin.write_all(&prompt_bytes).await;
+                let _ = stdin.flush().await;
+                drop(stdin);
+            });
+        }
+
+        let output = child.wait_with_output()
             .await
-            .context(format!("Не удалось запустить локальный agy бинарник '{}' (cwd: '{}')", bin_path, run_dir.display()))?;
+            .context("Ошибка ожидания завершения agy процесса")?;
 
         if !output.status.success() {
             let stderr = String::from_utf8_lossy(&output.stderr);
@@ -223,9 +295,12 @@ impl SolverRunner {
         prompt: &str,
         model: &str,
     ) -> Result<String> {
-        // Экранируем одинарные кавычки в промпте для безопасного bash -c
-        let escaped_prompt = prompt.replace('\'', "'\\''");
-        let remote_cmd = format!("cd {} && LANG=en_US.UTF-8 LC_ALL=en_US.UTF-8 {} --dangerously-skip-permissions --model {} -p '{}'", self.working_dir.display(), agy_bin, model, escaped_prompt);
+        let remote_cmd = format!(
+            "cd {} && LANG=en_US.UTF-8 LC_ALL=en_US.UTF-8 {} --dangerously-skip-permissions --model {}",
+            self.working_dir.display(),
+            agy_bin,
+            model
+        );
 
         let mut cmd = Command::new("ssh");
         cmd.arg("-o")
@@ -236,11 +311,27 @@ impl SolverRunner {
             .arg(port.to_string())
             .arg(format!("{}@{}", user, host))
             .arg(&remote_cmd)
+            .stdin(std::process::Stdio::piped())
+            .stdout(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::piped())
             .kill_on_drop(true);
 
-        let output = cmd.output()
-            .await
+        let mut child = cmd.spawn()
             .context("Не удалось запустить команду через ssh")?;
+
+        if let Some(mut stdin) = child.stdin.take() {
+            let prompt_bytes = prompt.as_bytes().to_vec();
+            tokio::spawn(async move {
+                use tokio::io::AsyncWriteExt;
+                let _ = stdin.write_all(&prompt_bytes).await;
+                let _ = stdin.flush().await;
+                drop(stdin);
+            });
+        }
+
+        let output = child.wait_with_output()
+            .await
+            .context("Ошибка ожидания ssh")?;
 
         if !output.status.success() {
             let stderr = String::from_utf8_lossy(&output.stderr);
@@ -276,8 +367,12 @@ impl SolverRunner {
         prompt: &str,
         model: &str,
     ) -> Result<String> {
-        let escaped_prompt = prompt.replace('\'', "'\\''");
-        let remote_cmd = format!("cd {} && LANG=en_US.UTF-8 LC_ALL=en_US.UTF-8 {} --dangerously-skip-permissions --model {} -p '{}'", self.working_dir.display(), agy_bin, model, escaped_prompt);
+        let remote_cmd = format!(
+            "cd {} && LANG=en_US.UTF-8 LC_ALL=en_US.UTF-8 {} --dangerously-skip-permissions --model {}",
+            self.working_dir.display(),
+            agy_bin,
+            model
+        );
 
         let mut cmd = Command::new("ssh");
         cmd.arg("-o")
@@ -288,11 +383,27 @@ impl SolverRunner {
             .arg(port.to_string())
             .arg(format!("{}@{}", user, host))
             .arg(&remote_cmd)
+            .stdin(std::process::Stdio::piped())
+            .stdout(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::piped())
             .kill_on_drop(true);
 
-        let output = cmd.output()
-            .await
+        let mut child = cmd.spawn()
             .context("Не удалось запустить команду через ssh")?;
+
+        if let Some(mut stdin) = child.stdin.take() {
+            let prompt_bytes = prompt.as_bytes().to_vec();
+            tokio::spawn(async move {
+                use tokio::io::AsyncWriteExt;
+                let _ = stdin.write_all(&prompt_bytes).await;
+                let _ = stdin.flush().await;
+                drop(stdin);
+            });
+        }
+
+        let output = child.wait_with_output()
+            .await
+            .context("Ошибка ожидания ssh")?;
 
         if !output.status.success() {
             let stderr = String::from_utf8_lossy(&output.stderr);
@@ -307,28 +418,37 @@ impl SolverRunner {
         let solution = String::from_utf8_lossy(&output.stdout).to_string();
         let ansi_cleaned = Self::strip_ansi(&solution);
         let latex_cleaned = crate::solver::latex::clean_latex(&ansi_cleaned);
-        Ok(latex_cleaned)
+        let chat_cleaned = crate::solver::humanizer::Humanizer::clean_chat_reply(&latex_cleaned);
+        Ok(chat_cleaned)
     }
 
     fn clean_solution(raw: &str) -> String {
-        // Удаляем ANSI escape sequences если они есть
-        let mut cleaned = String::new();
-        let mut in_escape = false;
-
-        for c in raw.chars() {
-            if c == '\x1b' {
-                in_escape = true;
-            } else if in_escape {
-                if c == 'm' || c == 'K' || c == 'H' || c == 'J' {
-                    in_escape = false;
-                }
-            } else {
-                cleaned.push(c);
-            }
-        }
-
-        let ansi_cleaned = cleaned.trim().to_string();
+        let ansi_cleaned = Self::strip_ansi(raw);
         let latex_cleaned = crate::solver::latex::clean_latex(&ansi_cleaned);
-        crate::solver::humanizer::Humanizer::humanize(&latex_cleaned)
+        let humanized = crate::solver::humanizer::Humanizer::humanize(&latex_cleaned);
+        crate::solver::humanizer::Humanizer::strip_emojis(&humanized)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_strip_ansi_colors_and_controls() {
+        let sample = "\x1b[32mУспешно выполнено\x1b[0m";
+        assert_eq!(SolverRunner::strip_ansi(sample), "Успешно выполнено");
+
+        let sample_cursor = "\x1b[?25hПривет, мир!\x1b[?25l";
+        assert_eq!(SolverRunner::strip_ansi(sample_cursor), "Привет, мир!");
+
+        let sample_clear = "\x1b[2J\x1b[HТекст после очистки";
+        assert_eq!(SolverRunner::strip_ansi(sample_clear), "Текст после очистки");
+
+        let sample_osc = "\x1b]0;Title\x07Заголовок терминала";
+        assert_eq!(SolverRunner::strip_ansi(sample_osc), "Заголовок терминала");
+
+        let sample_cyrillic = "Простой русский текст без кодов";
+        assert_eq!(SolverRunner::strip_ansi(sample_cyrillic), "Простой русский текст без кодов");
     }
 }

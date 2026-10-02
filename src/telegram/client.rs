@@ -755,7 +755,7 @@ impl TelegramClient {
         Ok(res.result.unwrap_or_default())
     }
 
-    fn split_message(text: &str, max_len: usize) -> Vec<String> {
+    pub fn split_message(text: &str, max_len: usize) -> Vec<String> {
         if text.len() <= max_len {
             return vec![text.to_string()];
         }
@@ -773,7 +773,14 @@ impl TelegramClient {
                 if line.len() > max_len {
                     let mut sub = line;
                     while sub.len() > max_len {
-                        let (part, rest) = sub.split_at(max_len);
+                        let mut split_pos = max_len;
+                        while split_pos > 0 && !sub.is_char_boundary(split_pos) {
+                            split_pos -= 1;
+                        }
+                        if split_pos == 0 {
+                            split_pos = sub.chars().next().map(|c| c.len_utf8()).unwrap_or(sub.len());
+                        }
+                        let (part, rest) = sub.split_at(split_pos);
                         chunks.push(part.to_string());
                         sub = rest;
                     }
@@ -794,5 +801,29 @@ impl TelegramClient {
         }
 
         chunks
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_split_message_utf8_boundary() {
+        // Проверяем строку, в которой байт 4000 попадает ровно внутрь 2-байтового русского символа
+        let text = format!("a{}", "б".repeat(3000));
+        let chunks = TelegramClient::split_message(&text, 4000);
+        assert!(chunks.len() >= 2);
+        for chunk in chunks {
+            assert!(chunk.len() <= 4000);
+        }
+
+        // Проверяем строку с эмодзи (4 байта на символ)
+        let text_emoji = format!("xyz{}", "🔥".repeat(1500));
+        let chunks_emoji = TelegramClient::split_message(&text_emoji, 4000);
+        assert!(chunks_emoji.len() >= 2);
+        for chunk in chunks_emoji {
+            assert!(chunk.len() <= 4000);
+        }
     }
 }

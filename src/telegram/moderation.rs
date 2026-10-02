@@ -100,24 +100,39 @@ impl ModerationManager {
         let lower = target_raw.to_lowercase();
         let mut main_target = target_raw.trim().to_string();
 
-        if let Some(pos) = lower.find("кроме") {
-            let (target_part, except_part) = target_raw.split_at(pos);
-            main_target = target_part.trim().trim_end_matches(',').trim().to_string();
-            let after_except = &except_part["кроме".len()..];
-            for token in after_except.split(|c: char| c == ',' || c.is_whitespace()) {
-                let clean = token.trim().trim_start_matches('@').trim_end_matches(',').trim().to_lowercase();
-                if !clean.is_empty() && !exclusions.contains(&clean) {
-                    exclusions.push(clean);
+        let kw_info = if let Some(pos) = lower.find("кроме") {
+            Some((pos, "кроме".len()))
+        } else if let Some(pos) = lower.find("except") {
+            Some((pos, "except".len()))
+        } else {
+            None
+        };
+
+        if let Some((pos, len)) = kw_info {
+            let char_offset = lower[..pos].chars().count();
+            let kw_chars = lower[pos..pos + len].chars().count();
+            let mut byte_start = None;
+            let mut byte_end = None;
+            for (c_idx, (b_idx, _)) in target_raw.char_indices().enumerate() {
+                if c_idx == char_offset {
+                    byte_start = Some(b_idx);
+                }
+                if c_idx == char_offset + kw_chars {
+                    byte_end = Some(b_idx);
                 }
             }
-        } else if let Some(pos) = lower.find("except") {
-            let (target_part, except_part) = target_raw.split_at(pos);
-            main_target = target_part.trim().trim_end_matches(',').trim().to_string();
-            let after_except = &except_part["except".len()..];
-            for token in after_except.split(|c: char| c == ',' || c.is_whitespace()) {
-                let clean = token.trim().trim_start_matches('@').trim_end_matches(',').trim().to_lowercase();
-                if !clean.is_empty() && !exclusions.contains(&clean) {
-                    exclusions.push(clean);
+            if let Some(b_start) = byte_start {
+                let target_part = &target_raw[..b_start];
+                main_target = target_part.trim().trim_end_matches(',').trim().to_string();
+                let after_except = match byte_end {
+                    Some(b_end) => &target_raw[b_end..],
+                    None => "",
+                };
+                for token in after_except.split(|c: char| c == ',' || c.is_whitespace()) {
+                    let clean = token.trim().trim_start_matches('@').trim_end_matches(',').trim().to_lowercase();
+                    if !clean.is_empty() && !exclusions.contains(&clean) {
+                        exclusions.push(clean);
+                    }
                 }
             }
         }

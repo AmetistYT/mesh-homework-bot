@@ -80,6 +80,67 @@ impl Humanizer {
         result.join("\n").trim().to_string()
     }
 
+    /// Очистка текста от любых Unicode-эмодзи
+    pub fn strip_emojis(text: &str) -> String {
+        text.chars()
+            .filter(|&c| {
+                !matches!(c,
+                    '\u{1F600}'..='\u{1F64F}' | // Emoticons
+                    '\u{1F300}'..='\u{1F5FF}' | // Misc Symbols and Pictographs
+                    '\u{1F680}'..='\u{1F6FF}' | // Transport and Map
+                    '\u{1F700}'..='\u{1F77F}' | // Alchemical Symbols
+                    '\u{1F780}'..='\u{1F7FF}' | // Geometric Shapes Extended
+                    '\u{1F800}'..='\u{1F8FF}' | // Supplemental Arrows-C
+                    '\u{1F900}'..='\u{1F9FF}' | // Supplemental Symbols and Pictographs
+                    '\u{1FA00}'..='\u{1FA6F}' | // Chess Symbols
+                    '\u{1FA70}'..='\u{1FAFF}' | // Symbols and Pictographs Extended-A
+                    '\u{2600}'..='\u{26FF}'   | // Misc symbols
+                    '\u{2700}'..='\u{27BF}'   | // Dingbats
+                    '\u{FE00}'..='\u{FE0F}'   | // Variation Selectors
+                    '\u{1F1E6}'..='\u{1F1FF}'   // Regional indicator symbols
+                )
+            })
+            .collect()
+    }
+
+    /// Специальная очистка ответов в AI-чате: убирает приветствия, концовки и эмодзи,
+    /// сохраняя блоки действий модерации telegram_action
+    pub fn clean_chat_reply(text: &str) -> String {
+        let no_emojis = Self::strip_emojis(text);
+        let mut lines: Vec<&str> = no_emojis.lines().collect();
+
+        // 1. Убираем приветствия, вводные строки и мета-комментарии в начале
+        while let Some(first) = lines.first() {
+            let trimmed = first.trim();
+            if trimmed.is_empty()
+                || Self::is_ai_intro(trimmed)
+                || trimmed.starts_with("```markdown")
+                || trimmed == "```"
+            {
+                lines.remove(0);
+            } else {
+                break;
+            }
+        }
+
+        // 2. Убираем заключительные фразы ИИ в конце
+        while let Some(last) = lines.last() {
+            let trimmed = last.trim();
+            if trimmed.is_empty() || Self::is_ai_outro(trimmed) {
+                lines.pop();
+            } else {
+                break;
+            }
+        }
+
+        let result = lines.join("\n").trim().to_string();
+        if result.is_empty() {
+            no_emojis.trim().to_string()
+        } else {
+            result
+        }
+    }
+
     /// Проверка вводных шаблонных фраз ИИ
     fn is_ai_intro(line: &str) -> bool {
         let l = line.to_lowercase();
@@ -88,24 +149,53 @@ impl Humanizer {
             || l.starts_with("представляю решение")
             || l.starts_with("домашнее задание по")
             || l.starts_with("конечно, вот")
+            || l.starts_with("конечно!")
+            || l.starts_with("конечно,")
             || l.starts_with("с удовольствием решу")
+            || l.starts_with("с радостью помогу")
             || l.starts_with("рассмотрим задачу")
             || l.starts_with("давайте решим")
+            || l.starts_with("давайте разберемся")
+            || l.starts_with("давай разберемся")
             || l.starts_with("привет!")
+            || l.starts_with("привет,")
+            || l.starts_with("привет ")
             || l.starts_with("здравствуйте")
+            || l.starts_with("добрый день")
+            || l.starts_with("доброе утро")
+            || l.starts_with("добрый вечер")
             || l.starts_with("привожу подробное решение")
+            || l.starts_with("вот ответ:")
+            || l.starts_with("вот ответ на")
+            || l.starts_with("по твоему запросу")
+            || l.starts_with("по вашему запросу")
+            || l.starts_with("отвечаю на вопрос")
+            || l.starts_with("касательно твоего вопроса")
+            || l.starts_with("что касается твоего вопроса")
+            || l.starts_with("что касается вашего вопроса")
     }
 
     /// Проверка концовок ИИ
     fn is_ai_outro(line: &str) -> bool {
         let l = line.to_lowercase();
         l.starts_with("надеюсь, это поможет")
+            || l.starts_with("надеюсь, это помогло")
+            || l.starts_with("надеюсь, помог")
             || l.starts_with("если есть вопросы")
+            || l.starts_with("если будут вопросы")
+            || l.starts_with("если появятся вопросы")
+            || l.starts_with("если возникнут вопросы")
             || l.starts_with("удачи в учебе")
+            || l.starts_with("удачи на уроке")
+            || l.starts_with("удачи!")
+            || l.starts_with("успехов!")
             || l.starts_with("обращайтесь")
+            || l.starts_with("обращайся")
+            || l.starts_with("всегда рад помочь")
+            || l.starts_with("всегда готов помочь")
+            || l.starts_with("хорошего дня")
             || l.starts_with("если нужно что-то дополнить")
             || l.starts_with("готово!")
-            || l.starts_with("удачи на уроке")
     }
 
     /// Проверка водянистых строк
