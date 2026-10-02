@@ -96,26 +96,28 @@ impl BotHandler {
                             let (reply_to_msg_id, reply_to_uid, reply_to_text) = match msg.reply_to_message.as_ref() {
                                 Some(r) => {
                                     let r_uid = r.from.as_ref().map(|u| u.id);
-                                    let r_text = r.text.as_deref().or(r.caption.as_deref());
-                                    (Some(r.message_id), r_uid, r_text)
+                                    let r_text = r.display_text();
+                                    let clean_r = if r_text.trim().is_empty() { None } else { Some(r_text) };
+                                    (Some(r.message_id), r_uid, clean_r)
                                 }
                                 None => (None, None, None),
                             };
 
-                            let text_content = msg.text.as_deref().or(msg.caption.as_deref()).unwrap_or("");
+                            let display_content = msg.display_text();
+                            let raw_text = msg.text.as_deref().or(msg.caption.as_deref()).unwrap_or("").trim();
 
-                            // Сохраняем любое входящее сообщение чата в БД для контекста диалога и анализа споров
-                            if !text_content.trim().is_empty() {
+                            // Сохраняем любое входящее сообщение чата (текст, стикер, медиа) в БД для контекста диалога и анализа споров
+                            if !display_content.trim().is_empty() {
                                 let _ = self.db.save_chat_message(
                                     &chat_id,
                                     message_id,
                                     from_id,
                                     from_username,
                                     &from_name,
-                                    text_content,
+                                    &display_content,
                                     reply_to_msg_id,
                                     reply_to_uid,
-                                    reply_to_text,
+                                    reply_to_text.as_deref(),
                                     msg.date,
                                 );
                             }
@@ -126,12 +128,91 @@ impl BotHandler {
                             let is_admin = is_ametist
                                 || (!self.admin_ids.is_empty() && self.admin_ids.contains(&from_id));
 
-                            if is_direct_moderation_command(text_content) {
-                                self.handle_direct_moderation(&chat_id, message_id, text_content, is_ametist, is_admin, reply_user).await;
-                            } else if text_content.starts_with('/') {
-                                self.handle_command(&chat_id, message_id, text_content, from_username, from_id, is_admin).await;
-                            } else if text_content.starts_with('!') {
-                                self.handle_chat_query(&chat_id, text_content, message_id, is_ametist, is_admin, reply_user).await;
+                            let is_reply_to_bot = msg.reply_to_message.as_ref().map_or(false, |r| {
+                                r.from.as_ref().map_or(false, |u| {
+                                    u.is_bot
+                                        || u.username.as_deref().map_or(false, |un| un.eq_ignore_ascii_case("ew1484_bot"))
+                                })
+                            });
+
+                            let raw_lower = raw_text.to_lowercase();
+                            let mentions_bot = raw_lower.contains("@ew1484_bot")
+                                || raw_lower.starts_with("бот,")
+                                || raw_lower.starts_with("бот ");
+
+                            let is_dispute_natural = is_dispute_query(raw_text) && (
+                                raw_lower.contains("сумарайз")
+                                    || raw_lower.contains("суммариз")
+                                    || raw_lower.contains("саммари")
+                                    || raw_lower.contains("разбери")
+                                    || raw_lower.contains("разбор")
+                                    || raw_lower.contains("что за спор")
+                                    || raw_lower.contains("из-за чего спор")
+                                    || raw_lower.contains("из за чего спор")
+                                    || raw_lower.contains("кто прав")
+                                    || raw_lower.contains("поясни за спор")
+                                    || is_reply_to_bot
+                                    || mentions_bot
+                            );
+
+                            if is_direct_moderation_command(raw_text) {
+                                self.handle_direct_moderation(&chat_id, message_id, from_id, raw_text, is_ametist, is_admin, reply_user).await;
+                            } else if raw_text.starts_with('/') {
+                                self.handle_command(&chat_id, message_id, raw_text, from_username, from_id, is_admin).await;
+                            } else if is_dispute_natural {
+                                self.handle_dispute_summary(&chat_id, message_id).await;
+                            } else if raw_text.starts_with('!') || is_reply_to_bot || mentions_bot {
+                                let query_text = if raw_text.starts_with('!') {
+                                    raw_text.to_string()
+                                } else if let Some(stripped) = raw_text.strip_prefix("@ew1484_bot") {
+                                    format!("!{}", stripped.trim())
+                                } else if let Some(stripped) = raw_text.strip_prefix("бот,") {
+                                    format!("!{}", stripped.trim())
+                                } else if let Some(stripped) = raw_text.strip_prefix("бот ") {
+                                    format!("!{}", stripped.trim())
+                                } else {
+                                    format!("!{}", raw_text)
+                                };
+                                self.handle_chat_query(&chat_id, &query_text, message_id, is_ametist, is_admin, reply_user).await;
+                            }
+                        } else if let Some(emsg) = u.edited_message {
+                            let display_content = emsg.display_text();
+                            if !display_content.trim().is_empty() {
+                                let (reply_to_msg_id, reply_to_uid, reply_to_text) = match emsg.reply_to_message.as_ref() {
+                                    Some(r) => {
+                                        let r_uid = r.from.as_ref().map(|u| u.id);
+                                        let r_text = r.display_text();
+                                        let clean_r = if r_text.trim().is_empty() { None } else { Some(r_text) };
+                                        (Some(r.message_id), r_uid, clean_r)
+                                    }
+                                    None => (None, None, None),
+                                };
+                                let from = emsg.from.as_ref();
+                                let from_id = from.map(|f| f.id).unwrap_or(0);
+                                let from_username = from.and_then(|f| f.username.as_deref());
+                                let from_name = match from {
+                                    Some(f) => {
+                                        if let Some(ref ln) = f.last_name {
+                                            format!("{} {}", f.first_name, ln)
+                                        } else {
+                                            f.first_name.clone()
+                                        }
+                                    }
+                                    None => "Пользователь".to_string(),
+                                };
+                                let chat_id = emsg.chat.id.to_string();
+                                let _ = self.db.save_chat_message(
+                                    &chat_id,
+                                    emsg.message_id,
+                                    from_id,
+                                    from_username,
+                                    &from_name,
+                                    &display_content,
+                                    reply_to_msg_id,
+                                    reply_to_uid,
+                                    reply_to_text.as_deref(),
+                                    emsg.date,
+                                );
                             }
                         }
                     }
@@ -323,12 +404,23 @@ impl BotHandler {
         &self,
         chat_id: &str,
         message_id: i64,
+        from_id: i64,
         text: &str,
         is_ametist: bool,
         is_admin: bool,
         reply_user: Option<(i64, Option<String>, Option<String>)>,
     ) {
-        if !is_ametist && !is_admin {
+        let mut has_permission = is_ametist || is_admin;
+        if !has_permission {
+            // Проверяем, является ли автор администратором Telegram группы
+            if let Ok(member) = self.tg.get_chat_member(chat_id, from_id).await {
+                if member.status == "creator" || member.status == "administrator" {
+                    has_permission = true;
+                }
+            }
+        }
+
+        if !has_permission {
             let _ = self
                 .tg
                 .send_message_reply(chat_id, "У вас нет прав для управления модерацией.", Some(message_id))
@@ -347,15 +439,42 @@ impl BotHandler {
         let target = if let Some((uid, ref un, ref fn_)) = reply_user {
             (uid, un.clone(), fn_.clone().unwrap_or_else(|| "пользователь".to_string()))
         } else {
-            // Если reply нет, ищем @username или ID в аргументах текста
+            // Если reply нет, ищем @username среди аргументов текста
             let mut found = None;
             for part in trimmed.split_whitespace().skip(1) {
-                if part.starts_with('@') || part.parse::<i64>().is_ok() {
+                if part.starts_with('@') {
                     if let Ok((uid, un)) =
                         ModerationManager::resolve_target_user(&self.tg, &self.db, chat_id, Some(part), None).await
                     {
                         found = Some((uid, un, part.to_string()));
                         break;
+                    }
+                }
+            }
+            // Если @username не найден, ищем явный числовой ID пользователя (длиннее 5 цифр и не являющийся временем)
+            if found.is_none() {
+                let words: Vec<&str> = trimmed.split_whitespace().collect();
+                for (idx, &part) in words.iter().enumerate().skip(1) {
+                    if let Ok(num_id) = part.parse::<i64>() {
+                        let next_is_unit = words.get(idx + 1).map_or(false, |next| {
+                            let n_low = next.to_lowercase();
+                            n_low.starts_with("мин")
+                                || n_low.starts_with("час")
+                                || n_low.starts_with("сек")
+                                || n_low.starts_with("дн")
+                                || n_low.starts_with("day")
+                                || n_low.starts_with("min")
+                                || n_low.starts_with("hour")
+                                || n_low.starts_with("sec")
+                        });
+                        if !next_is_unit && num_id > 100_000 {
+                            if let Ok((uid, un)) =
+                                ModerationManager::resolve_target_user(&self.tg, &self.db, chat_id, Some(part), None).await
+                            {
+                                found = Some((uid, un, part.to_string()));
+                                break;
+                            }
+                        }
                     }
                 }
             }
@@ -377,6 +496,12 @@ impl BotHandler {
 
         let target_uid = target.0;
         let target_mention = target.1.as_deref().unwrap_or(&target.2);
+
+        // Защита: нельзя замутить или забанить самого бота
+        if target.1.as_deref().map_or(false, |u| u.trim_start_matches('@').eq_ignore_ascii_case("ew1484_bot")) {
+            let _ = self.tg.send_message_reply(chat_id, "Невозможно применить ограничения к самому боту.", Some(message_id)).await;
+            return;
+        }
 
         if is_unmute {
             let action = crate::telegram::moderation::TelegramActionRequest {
@@ -434,8 +559,13 @@ impl BotHandler {
         }
 
         // Mute: ограничение на отправку сообщений и медиа
-        let duration_secs = Self::parse_duration_seconds(trimmed).unwrap_or(900); // 15 минут по умолчанию
-        let duration_human = Self::format_duration_human(duration_secs);
+        let is_perm = lower.contains("навсегда") || lower.contains("perm") || lower.contains("бессрочно");
+        let (duration_secs, duration_human, restore_prev) = if is_perm {
+            (None, "бессрочно".to_string(), false)
+        } else {
+            let secs = Self::parse_duration_seconds(trimmed).unwrap_or(900); // 15 минут по умолчанию
+            (Some(secs), format!("на {}", Self::format_duration_human(secs)), true)
+        };
 
         let perms = crate::telegram::client::ChatPermissions {
             can_send_messages: Some(false),
@@ -457,15 +587,15 @@ impl BotHandler {
         let action = crate::telegram::moderation::TelegramActionRequest {
             action: "restrict".to_string(),
             target: Some(target_uid.to_string()),
-            duration_seconds: Some(duration_secs),
+            duration_seconds: duration_secs,
             permissions: Some(perms),
-            restore_previous_after: true,
+            restore_previous_after: restore_prev,
         };
 
         match ModerationManager::execute_action(&self.tg, &self.db, chat_id, &action, reply_user, true).await {
             Ok(_) => {
                 let confirmation = format!(
-                    "Пользователь {} замучен на {}.",
+                    "Пользователь {} замучен {}.",
                     target_mention, duration_human
                 );
                 let _ = self.tg.send_message_reply(chat_id, &confirmation, Some(message_id)).await;
@@ -484,7 +614,7 @@ impl BotHandler {
     }
 
     async fn handle_dispute_summary(&self, chat_id: &str, message_id: i64) {
-        let history = match self.db.get_recent_dispute_context(chat_id, 300) {
+        let history = match self.db.get_recent_dispute_context(chat_id, 600) {
             Ok(h) => h,
             Err(e) => {
                 let _ = self
@@ -729,8 +859,8 @@ impl BotHandler {
             }
         }
 
-        // Загружаем недавний контекст истории диалога (до 200k токенов ~ 400-500k символов)
-        let chat_history = self.db.get_chat_history(chat_id, 250, 450_000).unwrap_or_default();
+        // Загружаем недавний контекст истории диалога (до 200k токенов ~ 700k символов)
+        let chat_history = self.db.get_chat_history(chat_id, 1500, 700_000).unwrap_or_default();
         let mut chat_history_context = String::new();
         if !chat_history.is_empty() {
             chat_history_context.push_str("ИСТОРИЯ ПЕРЕПИСКИ В ЧАТЕ (контекст диалога, до 200k токенов):\n");
@@ -950,6 +1080,7 @@ pub fn is_dispute_query(query: &str) -> bool {
         || lower.contains("диспут")
         || lower.contains("суммариз")
         || lower.contains("сумарайз")
+        || lower.contains("саммари")
         || lower.contains("разбор переписки")
         || lower.contains("что произошло в чате")
         || lower.contains("из-за чего спорили")
@@ -1290,9 +1421,44 @@ mod tests {
         assert!(is_dispute_query("/спор"));
         assert!(is_dispute_query("разбери спор в чате"));
         assert!(is_dispute_query("суммаризируй последний спор"));
+        assert!(is_dispute_query("сумарайз последнего спора в чате"));
+        assert!(is_dispute_query("сделай саммари спора"));
         assert!(is_dispute_query("кто прав в этом споре?"));
+        assert!(is_dispute_query("из-за чего спорили"));
         assert!(!is_dispute_query("Привет, как решить задачу 5?"));
         assert!(!is_dispute_query("что задали на завтра"));
+    }
+
+    #[test]
+    fn test_message_display_text() {
+        use crate::telegram::client::TelegramMessage;
+        let mut msg = TelegramMessage {
+            message_id: 1,
+            from: None,
+            chat: crate::telegram::client::TelegramChat { id: 1, title: None, username: None, chat_type: "group".to_string() },
+            text: None,
+            caption: None,
+            date: 0,
+            reply_to_message: None,
+            photo: None,
+            sticker: Some(serde_json::json!({})),
+            voice: None,
+            audio: None,
+            document: None,
+            video: None,
+            video_note: None,
+        };
+        assert_eq!(msg.display_text(), "[Стикер]");
+
+        msg.sticker = None;
+        msg.photo = Some(serde_json::json!({}));
+        assert_eq!(msg.display_text(), "[Фото]");
+
+        msg.caption = Some("Посмотри на это".to_string());
+        assert_eq!(msg.display_text(), "Посмотри на это");
+
+        msg.text = Some("Обычный текст".to_string());
+        assert_eq!(msg.display_text(), "Обычный текст");
     }
 }
 

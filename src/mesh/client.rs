@@ -469,69 +469,80 @@ impl MeshClient {
         Ok(None)
     }
 
-    /// Резервное извлечение актуального токена с Android-устройства (adb)
-    pub async fn refresh_from_adb_device(&self) -> Result<Option<String>> {
-        info!("Попытка резервного получения токена через ADB с устройства...");
-        let script = r#"
-import subprocess, re, json, base64, datetime
+    /// Автообновление токена через сохраненные сессионные куки СУДИР/mos.ru (логика mesh_expressive)
+    pub async fn refresh_from_sso(&self) -> Result<Option<String>> {
+        info!("Попытка автообновления токена через СУДИР SSO (refresh_mesh_sso.py)...");
+        let script_paths = [
+            "scripts/refresh_mesh_sso.py",
+            "/root/projects/mesh-homework-bot/scripts/refresh_mesh_sso.py",
+            "/home/ametist1337/projects/mesh-homework-bot/scripts/refresh_mesh_sso.py",
+        ];
 
-def is_valid(t):
-    if not t or len(t) <= 20: return False
-    parts = t.split('.')
-    if len(parts) < 2: return False
-    try:
-        p = parts[1] + '=' * ((4 - len(parts[1]) % 4) % 4)
-        data = json.loads(base64.urlsafe_b64decode(p).decode('utf-8', errors='ignore'))
-        return 'school.mos.ru' in data.get('iss', '') and datetime.datetime.now(datetime.timezone.utc).timestamp() < data.get('exp', 0) - 30
-    except:
-        return False
-
-for dev in ['10.8.1.1:5555', 'emulator-5554']:
-    try:
-        cmd = ['adb', '-s', dev, 'shell', 'su -c "cat /data/data/ru.mesh.expressive/shared_prefs/mesh_expressive_prefs.xml 2>/dev/null"']
-        res = subprocess.run(cmd, capture_output=True, text=True, timeout=5)
-        for t in re.findall(r'eyJ[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}', res.stdout):
-            if is_valid(t):
-                print(t)
-                exit(0)
-    except:
-        pass
-"#;
-        let output = tokio::process::Command::new("python3")
-            .arg("-c")
-            .arg(script)
-            .output()
-            .await;
-
-        if let Ok(out) = output {
-            let tok = String::from_utf8_lossy(&out.stdout).trim().to_string();
-            if !tok.is_empty() {
-                self.set_token(tok.clone()).await;
-                if let Some(ref db) = self.db {
-                    let _ = db.set_setting("mesh_token", &tok);
-                }
-                Self::update_env_file("MESH_JWT_TOKEN", &tok);
-                info!("Успешно получен свежий токен с устройства через ADB!");
-                return Ok(Some(tok));
+        let mut script_path = None;
+        for p in &script_paths {
+            if std::path::Path::new(p).exists() {
+                script_path = Some(*p);
+                break;
             }
         }
+
+        let script = match script_path {
+            Some(p) => p,
+            None => {
+                warn!("Скрипт refresh_mesh_sso.py не найден");
+                return Ok(None);
+            }
+        };
+
+        let output = tokio::process::Command::new("python3")
+            .arg(script)
+            .output()
+            .await?;
+
+        if !output.status.success() {
+            let stderr = String::from_utf8_lossy(&output.stderr);
+            warn!("refresh_mesh_sso.py завершился с ошибкой: {}", stderr);
+            return Ok(None);
+        }
+
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        if let Ok(val) = serde_json::from_str::<Value>(&stdout) {
+            if val.get("status").and_then(|s| s.as_str()) == Some("ok") {
+                if let Some(new_tok) = val.get("token").and_then(|t| t.as_str()) {
+                    let tok_str = new_tok.to_string();
+                    self.set_token(tok_str.clone()).await;
+                    if let Some(ref db) = self.db {
+                        let _ = db.set_setting("mesh_token", &tok_str);
+                    }
+                    if let Some(rt) = val.get("refresh_token").and_then(|t| t.as_str()) {
+                        self.set_refresh_token(rt.to_string()).await;
+                        if let Some(ref db) = self.db {
+                            let _ = db.set_setting("mesh_refresh_token", rt);
+                        }
+                    }
+                    info!("МЭШ токен успешно обновлен навсегда через СУДИР SSO!");
+                    return Ok(Some(tok_str));
+                }
+            }
+        }
+
         Ok(None)
     }
 
     /// Единый метод обновления токена МЭШ со всеми резервными цепочками
     pub async fn try_refresh(&self) -> Result<Option<String>> {
-        // 1. Приоритет: официальный refresh токена АУПД /v3/token/refresh
+        // 1. Приоритет: SSO автообновление через сессионные куки СУДИР/mos.ru
+        if let Ok(Some(tok)) = self.refresh_from_sso().await {
+            return Ok(Some(tok));
+        }
+
+        // 2. Резерв: официальный refresh токена АУПД /v3/token/refresh
         if let Ok(Some(tok)) = self.refresh_token_v3().await {
             return Ok(Some(tok));
         }
 
-        // 2. Резерв: sudir SSO cookies flow
+        // 3. Резерв: прямой sudir flow через reqwest
         if let Ok(Some(tok)) = self.try_refresh_sudir().await {
-            return Ok(Some(tok));
-        }
-
-        // 3. Резерв: извлечение из приложения mesh_expressive на подключенном телефоне
-        if let Ok(Some(tok)) = self.refresh_from_adb_device().await {
             return Ok(Some(tok));
         }
 

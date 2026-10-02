@@ -109,7 +109,16 @@ impl ModerationManager {
 
         // 2. Если передан числовой ID (например "123456789")
         if let Ok(num_id) = t_clean.parse::<i64>() {
-            return Ok((num_id, None));
+            let un = if let Some((ru_id, ref ru_un, _)) = reply_user {
+                if ru_id == num_id {
+                    ru_un.clone()
+                } else {
+                    None
+                }
+            } else {
+                None
+            };
+            return Ok((num_id, un));
         }
 
         // 3. Если передан reply_user, проверяем совпадение с ним (по username или имени)
@@ -213,7 +222,10 @@ impl ModerationManager {
                 Ok(format!("Пользователь {} разблокирован.", user_display))
             }
             "ban" => {
-                let until = action.duration_seconds.filter(|&s| s > 0).map(|s| Utc::now().timestamp() + s as i64);
+                let until = action.duration_seconds.filter(|&s| s > 0).map(|s| {
+                    let now = Utc::now().timestamp();
+                    if s < 30 { now + 35 } else { now + s as i64 }
+                });
                 tg.ban_chat_member(chat_id, user_id, until).await?;
                 if let Some(sec) = action.duration_seconds.filter(|&s| s > 0) {
                     Ok(format!("Пользователь {} заблокирован на {} сек.", user_display, sec))
@@ -326,7 +338,10 @@ impl ModerationManager {
                 // 3. Применяем ограничения
                 let empty_perms = ChatPermissions::default();
                 let perms_to_apply = action.permissions.as_ref().unwrap_or(&empty_perms);
-                let until = action.duration_seconds.filter(|&s| s > 0).map(|s| Utc::now().timestamp() + s as i64);
+                let until = action.duration_seconds.filter(|&s| s > 0).map(|s| {
+                    let now = Utc::now().timestamp();
+                    if s < 30 { now + 35 } else { now + s as i64 }
+                });
 
                 tg.restrict_chat_member(chat_id, user_id, perms_to_apply, until).await
                     .context("Ошибка вызова restrictChatMember в Telegram")?;

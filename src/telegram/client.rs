@@ -11,6 +11,7 @@ use tracing::info;
 pub struct TelegramUpdate {
     pub update_id: i64,
     pub message: Option<TelegramMessage>,
+    pub edited_message: Option<TelegramMessage>,
 }
 
 #[allow(dead_code)]
@@ -23,6 +24,50 @@ pub struct TelegramMessage {
     pub caption: Option<String>,
     pub date: i64,
     pub reply_to_message: Option<Box<TelegramMessage>>,
+    pub photo: Option<serde_json::Value>,
+    pub sticker: Option<serde_json::Value>,
+    pub voice: Option<serde_json::Value>,
+    pub audio: Option<serde_json::Value>,
+    pub document: Option<serde_json::Value>,
+    pub video: Option<serde_json::Value>,
+    pub video_note: Option<serde_json::Value>,
+}
+
+impl TelegramMessage {
+    pub fn display_text(&self) -> String {
+        if let Some(ref t) = self.text {
+            if !t.trim().is_empty() {
+                return t.clone();
+            }
+        }
+        if let Some(ref c) = self.caption {
+            if !c.trim().is_empty() {
+                return c.clone();
+            }
+        }
+        if self.sticker.is_some() {
+            return "[Стикер]".to_string();
+        }
+        if self.voice.is_some() {
+            return "[Голосовое сообщение]".to_string();
+        }
+        if self.video_note.is_some() {
+            return "[Кружочек/видеосообщение]".to_string();
+        }
+        if self.photo.is_some() {
+            return "[Фото]".to_string();
+        }
+        if self.video.is_some() {
+            return "[Видео]".to_string();
+        }
+        if self.document.is_some() {
+            return "[Документ]".to_string();
+        }
+        if self.audio.is_some() {
+            return "[Аудио]".to_string();
+        }
+        String::new()
+    }
 }
 
 #[allow(dead_code)]
