@@ -99,6 +99,12 @@ impl SolverRunner {
             agy_bin.to_string()
         };
 
+        let run_dir = if self.working_dir.exists() {
+            self.working_dir.clone()
+        } else {
+            std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."))
+        };
+
         let mut cmd = Command::new(&bin_path);
         cmd.arg("--dangerously-skip-permissions")
             .arg("--model")
@@ -107,13 +113,13 @@ impl SolverRunner {
             .arg(prompt)
             .env("LANG", "en_US.UTF-8")
             .env("LC_ALL", "en_US.UTF-8")
-            .current_dir(&self.working_dir)
+            .current_dir(&run_dir)
             .stdin(std::process::Stdio::null())
             .kill_on_drop(true);
 
         let output = cmd.output()
             .await
-            .context(format!("Не удалось запустить локальный agy бинарник '{}'", bin_path))?;
+            .context(format!("Не удалось запустить локальный agy бинарник '{}' (cwd: '{}')", bin_path, run_dir.display()))?;
 
         if !output.status.success() {
             let stderr = String::from_utf8_lossy(&output.stderr);
@@ -160,6 +166,12 @@ impl SolverRunner {
             agy_bin.to_string()
         };
 
+        let run_dir = if self.working_dir.exists() {
+            self.working_dir.clone()
+        } else {
+            std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."))
+        };
+
         let mut cmd = Command::new(&bin_path);
         cmd.arg("--dangerously-skip-permissions")
             .arg("--model")
@@ -168,13 +180,13 @@ impl SolverRunner {
             .arg(prompt)
             .env("LANG", "en_US.UTF-8")
             .env("LC_ALL", "en_US.UTF-8")
-            .current_dir(&self.working_dir)
+            .current_dir(&run_dir)
             .stdin(std::process::Stdio::null())
             .kill_on_drop(true);
 
         let output = cmd.output()
             .await
-            .context(format!("Не удалось запустить локальный agy бинарник '{}' (cwd: '{}')", bin_path, self.working_dir.display()))?;
+            .context(format!("Не удалось запустить локальный agy бинарник '{}' (cwd: '{}')", bin_path, run_dir.display()))?;
 
         if !output.status.success() {
             let stderr = String::from_utf8_lossy(&output.stderr);

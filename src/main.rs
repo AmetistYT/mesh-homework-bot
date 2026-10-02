@@ -29,6 +29,9 @@ async fn main() -> Result<()> {
     let cfg = Config::from_env();
     info!("Конфигурация загружена. Student ID: {}", cfg.student_id);
 
+    let _ = std::fs::create_dir_all(&cfg.textbooks_dir);
+    let _ = std::fs::create_dir_all(&cfg.rules_dir);
+
     let db = Database::open(&cfg.db_path)?;
     info!("База данных инициализирована: {}", cfg.db_path.display());
 
