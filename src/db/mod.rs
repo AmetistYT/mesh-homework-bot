@@ -45,6 +45,22 @@ pub struct PermissionBackupRecord {
     pub created_at: String,
 }
 
+#[derive(Debug, Clone)]
+pub struct ChatMessageRecord {
+    pub id: i64,
+    pub chat_id: String,
+    pub message_id: i64,
+    pub user_id: i64,
+    pub username: Option<String>,
+    pub full_name: String,
+    pub text: String,
+    pub reply_to_message_id: Option<i64>,
+    pub reply_to_user_id: Option<i64>,
+    pub reply_to_text: Option<String>,
+    pub timestamp: i64,
+    pub created_at: String,
+}
+
 #[derive(Clone)]
 pub struct Database {
     conn: Arc<Mutex<Connection>>,
@@ -104,11 +120,28 @@ impl Database {
                 created_at TEXT NOT NULL
             );
 
+            CREATE TABLE IF NOT EXISTS chat_messages (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                chat_id TEXT NOT NULL,
+                message_id INTEGER NOT NULL,
+                user_id INTEGER NOT NULL,
+                username TEXT,
+                full_name TEXT NOT NULL,
+                text TEXT NOT NULL,
+                reply_to_message_id INTEGER,
+                reply_to_user_id INTEGER,
+                reply_to_text TEXT,
+                timestamp INTEGER NOT NULL,
+                created_at TEXT NOT NULL
+            );
+
             CREATE INDEX IF NOT EXISTS idx_hw_entry_id ON processed_homeworks (homework_entry_student_id);
             CREATE INDEX IF NOT EXISTS idx_hw_status ON processed_homeworks (status);
             CREATE INDEX IF NOT EXISTS idx_seen_username ON seen_users (username);
             CREATE INDEX IF NOT EXISTS idx_perm_user ON permission_backups (chat_id, user_id);
             CREATE INDEX IF NOT EXISTS idx_perm_restore ON permission_backups (restore_at, restored);
+            CREATE UNIQUE INDEX IF NOT EXISTS idx_chat_msg ON chat_messages (chat_id, message_id);
+            CREATE INDEX IF NOT EXISTS idx_chat_time ON chat_messages (chat_id, timestamp);
             ",
         )
         .context("Ошибка создания таблиц SQLite")?;
@@ -516,4 +549,149 @@ impl Database {
         }
         Ok(list)
     }
+
+    pub fn save_chat_message(
+        &self,
+        chat_id: &str,
+        message_id: i64,
+        user_id: i64,
+        username: Option<&str>,
+        full_name: &str,
+        text: &str,
+        reply_to_message_id: Option<i64>,
+        reply_to_user_id: Option<i64>,
+        reply_to_text: Option<&str>,
+        timestamp: i64,
+    ) -> Result<()> {
+        let conn = self.conn.lock().unwrap();
+        let now = Local::now().to_rfc3339();
+        let clean_username = username.map(|u| u.trim_start_matches('@').to_string());
+
+        conn.execute(
+            "INSERT INTO chat_messages (
+                chat_id, message_id, user_id, username, full_name, text,
+                reply_to_message_id, reply_to_user_id, reply_to_text, timestamp, created_at
+            ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)
+            ON CONFLICT(chat_id, message_id) DO UPDATE SET
+                text = excluded.text,
+                full_name = excluded.full_name,
+                username = excluded.username",
+            params![
+                chat_id,
+                message_id,
+                user_id,
+                clean_username,
+                full_name,
+                text,
+                reply_to_message_id,
+                reply_to_user_id,
+                reply_to_text,
+                timestamp,
+                now
+            ],
+        )?;
+
+        Ok(())
+    }
+
+    /// Получение истории сообщений чата в хронологическом порядке (от старых к новым)
+    /// с ограничением по количеству сообщений и символов (для лимита контекста в 200k токенов)
+    pub fn get_chat_history(
+        &self,
+        chat_id: &str,
+        max_messages: usize,
+        max_chars: usize,
+    ) -> Result<Vec<ChatMessageRecord>> {
+        let conn = self.conn.lock().unwrap();
+        let mut stmt = conn.prepare(
+            "SELECT id, chat_id, message_id, user_id, username, full_name, text,
+                    reply_to_message_id, reply_to_user_id, reply_to_text, timestamp, created_at
+             FROM chat_messages
+             WHERE chat_id = ?1
+             ORDER BY timestamp DESC, id DESC
+             LIMIT ?2",
+        )?;
+
+        let rows = stmt.query_map(params![chat_id, max_messages as i64], |row| {
+            Ok(ChatMessageRecord {
+                id: row.get(0)?,
+                chat_id: row.get(1)?,
+                message_id: row.get(2)?,
+                user_id: row.get(3)?,
+                username: row.get(4)?,
+                full_name: row.get(5)?,
+                text: row.get(6)?,
+                reply_to_message_id: row.get(7)?,
+                reply_to_user_id: row.get(8)?,
+                reply_to_text: row.get(9)?,
+                timestamp: row.get(10)?,
+                created_at: row.get(11)?,
+            })
+        })?;
+
+        let mut raw_list = Vec::new();
+        let mut total_chars = 0;
+        for r in rows {
+            let item = r?;
+            total_chars += item.text.len();
+            raw_list.push(item);
+            if total_chars >= max_chars {
+                break;
+            }
+        }
+
+        // Переворачиваем обратно в хронологический порядок: от старых к новым
+        raw_list.reverse();
+        Ok(raw_list)
+    }
+
+    /// Получение контекста для разбора спора (последние сообщения чата)
+    pub fn get_recent_dispute_context(&self, chat_id: &str, limit: usize) -> Result<Vec<ChatMessageRecord>> {
+        self.get_chat_history(chat_id, limit, 500_000)
+    }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_chat_messages_storage_and_history() {
+        let db = Database::open(":memory:").expect("Failed to open in-memory db");
+
+        db.save_chat_message("-1001", 1, 10, Some("user1"), "Alice", "Первое сообщение", None, None, None, 100)
+            .expect("save message 1");
+        db.save_chat_message("-1001", 2, 20, Some("user2"), "Bob", "Второе сообщение в споре", Some(1), Some(10), Some("Первое сообщение"), 110)
+            .expect("save message 2");
+        db.save_chat_message("-1001", 3, 10, Some("user1"), "Alice", "Третье сообщение с аргументом", Some(2), Some(20), Some("Второе сообщение в споре"), 120)
+            .expect("save message 3");
+
+        // Проверяем получение истории (хронологический порядок: msg 1, 2, 3)
+        let history = db.get_chat_history("-1001", 10, 10000).expect("get_chat_history");
+        assert_eq!(history.len(), 3);
+        assert_eq!(history[0].message_id, 1);
+        assert_eq!(history[0].text, "Первое сообщение");
+        assert_eq!(history[1].message_id, 2);
+        assert_eq!(history[1].reply_to_user_id, Some(10));
+        assert_eq!(history[2].message_id, 3);
+        assert_eq!(history[2].text, "Третье сообщение с аргументом");
+
+        // Проверка лимита количества сообщений
+        let history_limited = db.get_chat_history("-1001", 2, 10000).expect("get_chat_history limited");
+        assert_eq!(history_limited.len(), 2);
+        assert_eq!(history_limited[0].message_id, 2);
+        assert_eq!(history_limited[1].message_id, 3);
+
+        // Проверка обновления при конфликте (chat_id, message_id)
+        db.save_chat_message("-1001", 3, 10, Some("user1"), "Alice", "Отредактированное третье сообщение", Some(2), Some(20), Some("Второе сообщение в споре"), 120)
+            .expect("save message 3 edit");
+        let history_updated = db.get_chat_history("-1001", 10, 10000).expect("get_chat_history after edit");
+        assert_eq!(history_updated.len(), 3);
+        assert_eq!(history_updated[2].text, "Отредактированное третье сообщение");
+
+        // Проверка разбора спора
+        let dispute_ctx = db.get_recent_dispute_context("-1001", 5).expect("get dispute context");
+        assert_eq!(dispute_ctx.len(), 3);
+    }
+}
+

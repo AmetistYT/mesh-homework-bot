@@ -4,6 +4,7 @@ use std::path::PathBuf;
 #[derive(Debug, Clone)]
 pub struct Config {
     pub mesh_token: String,
+    pub mesh_refresh_token: Option<String>,
     pub mesh_cookies: String,
     pub student_id: i64,
     pub tg_bot_token: String,
@@ -30,6 +31,7 @@ impl Config {
         let _ = dotenvy::dotenv();
 
         let mesh_token = env::var("MESH_JWT_TOKEN").unwrap_or_default();
+        let mesh_refresh_token = env::var("MESH_REFRESH_TOKEN").ok().filter(|s| !s.trim().is_empty());
         let mesh_cookies = env::var("MESH_COOKIES").unwrap_or_default();
         let student_id = env::var("MESH_STUDENT_ID")
             .ok()
@@ -95,6 +97,7 @@ impl Config {
 
         Self {
             mesh_token,
+            mesh_refresh_token,
             mesh_cookies,
             student_id,
             tg_bot_token,

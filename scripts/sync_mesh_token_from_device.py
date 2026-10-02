@@ -6,6 +6,7 @@ import re
 import os
 import sqlite3
 import datetime
+import tempfile
 
 VPS_HOST = "127.0.0.1"
 VPS_USER = "root"
@@ -40,11 +41,12 @@ def get_token_exp(token: str) -> int:
 
 def extract_from_device(device_id="10.8.1.1:5555"):
     candidate_tokens = []
+    candidate_refresh_tokens = []
 
     # 1. Check shared_prefs of mesh_expressive
-    cmd = ["adb", "-s", device_id, "shell", 'su -c "cat /data/data/ru.mesh.expressive/shared_prefs/mesh_expressive_prefs.xml 2>/dev/null"']
+    cmd_prefs = ["adb", "-s", device_id, "shell", 'su -c "cat /data/data/ru.mesh.expressive/shared_prefs/mesh_expressive_prefs.xml 2>/dev/null"']
     try:
-        res = subprocess.run(cmd, capture_output=True, text=True, timeout=10)
+        res = subprocess.run(cmd_prefs, capture_output=True, text=True, timeout=8)
         if res.returncode == 0:
             matches = re.findall(r'eyJ[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}', res.stdout)
             candidate_tokens.extend(matches)
@@ -52,62 +54,132 @@ def extract_from_device(device_id="10.8.1.1:5555"):
         pass
 
     # 2. Check cookies database of mesh_expressive
-    cmd_cookies = ["adb", "-s", device_id, "shell", 'su -c "sqlite3 /data/data/ru.mesh.expressive/app_webview/Default/Cookies \\\"SELECT value FROM cookies WHERE name IN (\'auth_token\', \'aupd_token\', \'token\');\\\" 2>/dev/null"']
+    with tempfile.NamedTemporaryFile(suffix=".db", delete=False) as tmp_file:
+        tmp_path = tmp_file.name
+
     try:
-        res_c = subprocess.run(cmd_cookies, capture_output=True, text=True, timeout=10)
-        if res_c.returncode == 0:
-            matches_c = re.findall(r'eyJ[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}', res_c.stdout)
-            candidate_tokens.extend(matches_c)
+        copy_cmd = ["adb", "-s", device_id, "shell", 'su -c "cp /data/data/ru.mesh.expressive/app_webview/Default/Cookies /data/local/tmp/Cookies && chmod 666 /data/local/tmp/Cookies"']
+        subprocess.run(copy_cmd, capture_output=True, timeout=8)
+
+        pull_cmd = ["adb", "-s", device_id, "pull", "/data/local/tmp/Cookies", tmp_path]
+        res_pull = subprocess.run(pull_cmd, capture_output=True, timeout=8)
+
+        if res_pull.returncode == 0 and os.path.exists(tmp_path) and os.path.getsize(tmp_path) > 0:
+            conn = sqlite3.connect(tmp_path)
+            c = conn.cursor()
+            c.execute("SELECT name, value FROM cookies WHERE name IN ('aupd_token', 'auth_token', 'token', 'aupd_refresh_token', 'refresh_token');")
+            for name, val in c.fetchall():
+                if name in ('aupd_refresh_token', 'refresh_token'):
+                    candidate_refresh_tokens.append(val)
+                else:
+                    candidate_tokens.append(val)
+            conn.close()
     except Exception:
         pass
+    finally:
+        if os.path.exists(tmp_path):
+            os.remove(tmp_path)
 
     valid_tokens = [t for t in set(candidate_tokens) if is_jwt_valid_and_not_expired(t)]
     if not valid_tokens:
-        return None
+        return None, None
 
     valid_tokens.sort(key=get_token_exp, reverse=True)
-    return valid_tokens[0]
+    best_access = valid_tokens[0]
 
-def update_local(token: str):
+    best_refresh = None
+    if candidate_refresh_tokens:
+        candidate_refresh_tokens.sort(key=get_token_exp, reverse=True)
+        best_refresh = candidate_refresh_tokens[0]
+
+    return best_access, best_refresh
+
+def update_local(token: str, refresh_token: str = None):
     now = datetime.datetime.now().isoformat()
     if os.path.exists(LOCAL_DB):
         conn = sqlite3.connect(LOCAL_DB)
         c = conn.cursor()
         c.execute("INSERT OR REPLACE INTO settings (key, value, updated_at) VALUES ('mesh_token', ?, ?)", (token, now))
+        if refresh_token:
+            c.execute("INSERT OR REPLACE INTO settings (key, value, updated_at) VALUES ('mesh_refresh_token', ?, ?)", (refresh_token, now))
         conn.commit()
         conn.close()
 
     if os.path.exists(LOCAL_ENV):
         with open(LOCAL_ENV, "r", encoding="utf-8") as f:
             lines = f.readlines()
-        with open(LOCAL_ENV, "w", encoding="utf-8") as f:
-            for l in lines:
-                if l.startswith("MESH_JWT_TOKEN="):
-                    f.write(f"MESH_JWT_TOKEN={token}\n")
+        has_refresh = False
+        new_lines = []
+        for l in lines:
+            if l.startswith("MESH_JWT_TOKEN="):
+                new_lines.append(f"MESH_JWT_TOKEN={token}\n")
+            elif l.startswith("MESH_REFRESH_TOKEN="):
+                has_refresh = True
+                if refresh_token:
+                    new_lines.append(f"MESH_REFRESH_TOKEN={refresh_token}\n")
                 else:
-                    f.write(l)
+                    new_lines.append(l)
+            else:
+                new_lines.append(l)
+        if not has_refresh and refresh_token:
+            new_lines.append(f"MESH_REFRESH_TOKEN={refresh_token}\n")
+        with open(LOCAL_ENV, "w", encoding="utf-8") as f:
+            f.writelines(new_lines)
 
-def update_vps(token: str):
-    now = datetime.datetime.now().isoformat()
-    remote_script = f"""
-import sqlite3
-token = "{token}"
-now = "{now}"
-conn = sqlite3.connect("/root/projects/mesh-homework-bot/data/homeworks.db")
-c = conn.cursor()
-c.execute("INSERT OR REPLACE INTO settings (key, value, updated_at) VALUES ('mesh_token', ?, ?)", (token, now))
-conn.commit()
-conn.close()
-"""
-    cmd_ssh = [
+def get_vps_token_info():
+    cmd = [
         "sshpass", "-p", VPS_PASS,
         "ssh", "-o", "StrictHostKeyChecking=no", f"{VPS_USER}@{VPS_HOST}",
-        f"python3 -c '{remote_script}' && sed -i 's|^MESH_JWT_TOKEN=.*|MESH_JWT_TOKEN={token}|' /root/projects/mesh-homework-bot/.env"
+        "sqlite3 /root/projects/mesh-homework-bot/data/homeworks.db \"SELECT key, value FROM settings WHERE key IN ('mesh_token', 'mesh_refresh_token');\""
     ]
-    subprocess.run(cmd_ssh, check=True, timeout=15)
+    try:
+        res = subprocess.run(cmd, capture_output=True, text=True, timeout=10)
+        data = {}
+        if res.returncode == 0:
+            for line in res.stdout.splitlines():
+                if "|" in line:
+                    k, v = line.split("|", 1)
+                    data[k] = v
+        return data
+    except Exception:
+        return {}
+
+def update_vps(token: str, refresh_token: str = None):
+    sql = f"INSERT OR REPLACE INTO settings (key, value, updated_at) VALUES ('mesh_token', '{token}', datetime('now'));"
+    if refresh_token:
+        sql += f" INSERT OR REPLACE INTO settings (key, value, updated_at) VALUES ('mesh_refresh_token', '{refresh_token}', datetime('now'));"
+
+    cmd_sql = [
+        "sshpass", "-p", VPS_PASS,
+        "ssh", "-o", "StrictHostKeyChecking=no", f"{VPS_USER}@{VPS_HOST}",
+        f'sqlite3 /root/projects/mesh-homework-bot/data/homeworks.db "{sql}"'
+    ]
+    subprocess.run(cmd_sql, check=True, timeout=15)
+
+    cmd_env = [
+        "sshpass", "-p", VPS_PASS,
+        "ssh", "-o", "StrictHostKeyChecking=no", f"{VPS_USER}@{VPS_HOST}",
+        f"sed -i 's|^MESH_JWT_TOKEN=.*|MESH_JWT_TOKEN={token}|' /root/projects/mesh-homework-bot/.env"
+    ]
+    subprocess.run(cmd_env, check=True, timeout=15)
+
+    if refresh_token:
+        cmd_rt_env = [
+            "sshpass", "-p", VPS_PASS,
+            "ssh", "-o", "StrictHostKeyChecking=no", f"{VPS_USER}@{VPS_HOST}",
+            f"grep -q '^MESH_REFRESH_TOKEN=' /root/projects/mesh-homework-bot/.env && sed -i 's|^MESH_REFRESH_TOKEN=.*|MESH_REFRESH_TOKEN={refresh_token}|' /root/projects/mesh-homework-bot/.env || echo 'MESH_REFRESH_TOKEN={refresh_token}' >> /root/projects/mesh-homework-bot/.env"
+        ]
+        subprocess.run(cmd_rt_env, check=True, timeout=15)
+
+    cmd_restart = [
+        "sshpass", "-p", VPS_PASS,
+        "ssh", "-o", "StrictHostKeyChecking=no", f"{VPS_USER}@{VPS_HOST}",
+        "systemctl restart mesh-homework-bot.service"
+    ]
+    subprocess.run(cmd_restart, check=True, timeout=15)
 
 def main():
-    token = extract_from_device()
+    token, refresh_token = extract_from_device()
     if not token:
         print("No valid active token found on device.")
         return
@@ -128,14 +200,22 @@ def main():
         except Exception:
             pass
 
-    if cur_token == token:
-        print("Token on device matches current active token. Up to date.")
-        return
+    needs_local_update = (cur_token != token)
+    if needs_local_update:
+        print("Local token differs or missing. Updating local...")
+        update_local(token, refresh_token)
+        print("Local updated.")
 
-    print("New token detected! Updating local and VPS...")
-    update_local(token)
-    update_vps(token)
-    print("Token synchronized successfully to local and VPS!")
+    vps_info = get_vps_token_info()
+    vps_token = vps_info.get("mesh_token", "")
+    vps_is_valid = is_jwt_valid_and_not_expired(vps_token)
+
+    if not vps_is_valid or vps_token != token:
+        print(f"VPS token needs update (valid={vps_is_valid}, matches={vps_token == token}). Updating VPS...")
+        update_vps(token, refresh_token)
+        print("VPS updated and mesh-homework-bot.service restarted successfully!")
+    else:
+        print("VPS token is valid and up to date.")
 
 if __name__ == "__main__":
     main()

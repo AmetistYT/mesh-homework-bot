@@ -88,6 +88,7 @@ impl Engine {
             tokio::select! {
                 _ = interval.tick() => {
                     self.unpin_expired_messages().await;
+                    let _ = self.mesh.check_and_proactive_refresh().await;
 
                     let now = Local::now();
                     let today = now.date_naive();

@@ -44,13 +44,24 @@ async fn main() -> Result<()> {
         }
     };
 
+    let active_refresh_token = match db.get_setting("mesh_refresh_token") {
+        Ok(Some(rt)) if !rt.trim().is_empty() => Some(rt),
+        _ => cfg.mesh_refresh_token.clone(),
+    };
+
     let active_cookies = db
         .get_setting("mesh_cookies")
         .ok()
         .flatten()
         .unwrap_or_else(|| cfg.mesh_cookies.clone());
 
-    let mesh_client = MeshClient::new(active_token, cfg.student_id, active_cookies)?;
+    let mesh_client = MeshClient::new(
+        active_token,
+        active_refresh_token,
+        cfg.student_id,
+        active_cookies,
+        Some(db.clone()),
+    )?;
 
     // Проверяем профиль в МЭШ
     match mesh_client.get_profile().await {

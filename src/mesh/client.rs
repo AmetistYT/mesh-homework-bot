@@ -6,8 +6,9 @@ use reqwest::header::{HeaderMap, HeaderValue, AUTHORIZATION, USER_AGENT};
 use serde_json::Value;
 use std::sync::Arc;
 use tokio::sync::RwLock;
-use tracing::info;
+use tracing::{info, warn};
 
+use crate::db::Database;
 use super::models::{
     EventCalendarItem, EventCalendarResponse, HomeworkItem, HomeworksShortResponse, ProfileResponse,
 };
@@ -18,13 +19,21 @@ const MES_API_BASE: &str = "https://school.mos.ru/api/family/mobile/v1";
 pub struct MeshClient {
     client: reqwest::Client,
     jwt_token: Arc<RwLock<String>>,
+    refresh_token: Arc<RwLock<Option<String>>>,
     student_id: i64,
     cookies: Arc<RwLock<String>>,
     person_id: Arc<RwLock<Option<String>>>,
+    db: Option<Database>,
 }
 
 impl MeshClient {
-    pub fn new(jwt_token: String, student_id: i64, initial_cookies: String) -> Result<Self> {
+    pub fn new(
+        jwt_token: String,
+        refresh_token: Option<String>,
+        student_id: i64,
+        initial_cookies: String,
+        db: Option<Database>,
+    ) -> Result<Self> {
         let client = reqwest::Client::builder()
             .redirect(reqwest::redirect::Policy::limited(10))
             .build()?;
@@ -34,14 +43,25 @@ impl MeshClient {
         Ok(Self {
             client,
             jwt_token: Arc::new(RwLock::new(jwt_token)),
+            refresh_token: Arc::new(RwLock::new(refresh_token)),
             student_id,
             cookies: Arc::new(RwLock::new(initial_cookies)),
             person_id: Arc::new(RwLock::new(initial_person_id)),
+            db,
         })
     }
 
     pub async fn get_token(&self) -> String {
         self.jwt_token.read().await.clone()
+    }
+
+    pub async fn get_refresh_token(&self) -> Option<String> {
+        self.refresh_token.read().await.clone()
+    }
+
+    pub async fn set_refresh_token(&self, new_rt: String) {
+        let mut guard = self.refresh_token.write().await;
+        *guard = Some(new_rt);
     }
 
     pub async fn set_token(&self, new_token: String) {
@@ -178,6 +198,10 @@ impl MeshClient {
     }
 
     pub async fn get_profile(&self) -> Result<ProfileResponse> {
+        if self.is_token_expired().await {
+            let _ = self.try_refresh().await;
+        }
+
         let token = self.get_token().await;
         let url = format!("{}/profile", MES_API_BASE);
 
@@ -191,6 +215,23 @@ impl MeshClient {
 
         if !resp.status().is_success() {
             let status = resp.status();
+            if status.as_u16() == 401 {
+                warn!("Получен 401 Unauthorized от МЭШ /profile. Пробуем автообновление токена...");
+                if let Ok(Some(new_token)) = self.try_refresh().await {
+                    let retry_resp = self
+                        .client
+                        .get(&url)
+                        .headers(self.build_headers(&new_token))
+                        .send()
+                        .await
+                        .context("Ошибка повторного запроса к МЭШ /profile")?;
+
+                    if retry_resp.status().is_success() {
+                        let profile = retry_resp.json::<ProfileResponse>().await?;
+                        return Ok(profile);
+                    }
+                }
+            }
             let body = resp.text().await.unwrap_or_default();
             return Err(anyhow!("Ошибка получения профиля: {} - {}", status, body));
         }
@@ -204,6 +245,10 @@ impl MeshClient {
         from_date: NaiveDate,
         to_date: NaiveDate,
     ) -> Result<Vec<HomeworkItem>> {
+        if self.is_token_expired().await {
+            let _ = self.try_refresh().await;
+        }
+
         let token = self.get_token().await;
         let url = format!("{}/homeworks/short", MES_API_BASE);
 
@@ -225,9 +270,9 @@ impl MeshClient {
         if !resp.status().is_success() {
             let status = resp.status();
             if status.as_u16() == 401 {
-                tracing::warn!("Получен 401 Unauthorized от МЭШ API. Пробуем автообновление токена...");
-                if let Ok(Some(new_token)) = self.try_refresh_sudir().await {
-                    tracing::info!("Токен успешно обновлен через СУДИР, повторяем запрос ДЗ");
+                warn!("Получен 401 Unauthorized от МЭШ API. Пробуем автообновление токена...");
+                if let Ok(Some(new_token)) = self.try_refresh().await {
+                    info!("Токен успешно обновлен, повторяем запрос ДЗ");
                     let retry_resp = self
                         .client
                         .get(&url)
@@ -270,6 +315,19 @@ impl MeshClient {
 
         if !resp.status().is_success() {
             let status = resp.status();
+            if status.as_u16() == 401 {
+                if let Ok(Some(new_token)) = self.try_refresh().await {
+                    let retry = self
+                        .client
+                        .post(&url)
+                        .headers(self.build_headers(&new_token))
+                        .send()
+                        .await?;
+                    if retry.status().is_success() {
+                        return Ok(());
+                    }
+                }
+            }
             let text = resp.text().await.unwrap_or_default();
             return Err(anyhow!("Не удалось отметить ДЗ выполненным: {} - {}", status, text));
         }
@@ -282,6 +340,10 @@ impl MeshClient {
         from_date: NaiveDate,
         to_date: NaiveDate,
     ) -> Result<Vec<EventCalendarItem>> {
+        if self.is_token_expired().await {
+            let _ = self.try_refresh().await;
+        }
+
         let token = self.get_token().await;
         let person_id = self.get_or_fetch_person_id().await?;
         let url = "https://school.mos.ru/api/eventcalendar/v1/api/events";
@@ -306,8 +368,8 @@ impl MeshClient {
         if !resp.status().is_success() {
             let status = resp.status();
             if status.as_u16() == 401 {
-                tracing::warn!("Получен 401 от EventCalendar API. Пробуем автообновление токена...");
-                if let Ok(Some(new_token)) = self.try_refresh_sudir().await {
+                warn!("Получен 401 от EventCalendar API. Пробуем автообновление токена...");
+                if let Ok(Some(new_token)) = self.try_refresh().await {
                     let mut retry_headers = self.build_headers(&new_token);
                     retry_headers.insert("x-mes-role", HeaderValue::from_static("student"));
                     let retry_resp = self
@@ -336,6 +398,236 @@ impl MeshClient {
 
         let body: EventCalendarResponse = resp.json().await?;
         Ok(body.response.unwrap_or_default())
+    }
+
+    /// Обновление пары токенов через официальный эндпоинт МЭШ /v3/token/refresh
+    pub async fn refresh_token_v3(&self) -> Result<Option<String>> {
+        let rt_opt = {
+            let guard = self.refresh_token.read().await;
+            guard.clone()
+        };
+
+        let rt = match rt_opt {
+            Some(ref t) if !t.trim().is_empty() => t.clone(),
+            _ => {
+                if let Some(ref db) = self.db {
+                    if let Ok(Some(db_rt)) = db.get_setting("mesh_refresh_token") {
+                        if !db_rt.trim().is_empty() {
+                            db_rt
+                        } else {
+                            let cookies = self.cookies.read().await;
+                            Self::extract_refresh_token_from_cookie(&cookies).unwrap_or_default()
+                        }
+                    } else {
+                        let cookies = self.cookies.read().await;
+                        Self::extract_refresh_token_from_cookie(&cookies).unwrap_or_default()
+                    }
+                } else {
+                    let cookies = self.cookies.read().await;
+                    Self::extract_refresh_token_from_cookie(&cookies).unwrap_or_default()
+                }
+            }
+        };
+
+        if rt.trim().is_empty() {
+            warn!("Refresh token не найден для вызова /v3/token/refresh");
+            return Ok(None);
+        }
+
+        info!("Попытка автообновления токена через /v3/token/refresh...");
+        let url = "https://school.mos.ru/v3/token/refresh";
+        let resp = self
+            .client
+            .post(url)
+            .header(reqwest::header::CONTENT_TYPE, "application/x-www-form-urlencoded")
+            .header(reqwest::header::USER_AGENT, "okhttp/4.12.0")
+            .body(format!("refresh_token={}", rt.trim()))
+            .send()
+            .await?;
+
+        let status = resp.status();
+        if !status.is_success() {
+            let body = resp.text().await.unwrap_or_default();
+            warn!("Ошибка /v3/token/refresh ({}): {}", status, body);
+            return Ok(None);
+        }
+
+        let body: Value = resp.json().await?;
+        let new_access = body.get("access_token").and_then(|v| v.as_str()).map(|s| s.to_string());
+        let new_refresh = body.get("refresh_token").and_then(|v| v.as_str()).map(|s| s.to_string());
+
+        if let Some(access) = new_access {
+            self.set_token(access.clone()).await;
+            if let Some(ref rtok) = new_refresh {
+                self.set_refresh_token(rtok.clone()).await;
+            }
+            self.save_tokens(&access, new_refresh.as_deref().unwrap_or(&rt)).await;
+            info!("МЭШ JWT токен успешно обновлен навсегда через /v3/token/refresh!");
+            return Ok(Some(access));
+        }
+
+        Ok(None)
+    }
+
+    /// Резервное извлечение актуального токена с Android-устройства (adb)
+    pub async fn refresh_from_adb_device(&self) -> Result<Option<String>> {
+        info!("Попытка резервного получения токена через ADB с устройства...");
+        let script = r#"
+import subprocess, re, json, base64, datetime
+
+def is_valid(t):
+    if not t or len(t) <= 20: return False
+    parts = t.split('.')
+    if len(parts) < 2: return False
+    try:
+        p = parts[1] + '=' * ((4 - len(parts[1]) % 4) % 4)
+        data = json.loads(base64.urlsafe_b64decode(p).decode('utf-8', errors='ignore'))
+        return 'school.mos.ru' in data.get('iss', '') and datetime.datetime.now(datetime.timezone.utc).timestamp() < data.get('exp', 0) - 30
+    except:
+        return False
+
+for dev in ['10.8.1.1:5555', 'emulator-5554']:
+    try:
+        cmd = ['adb', '-s', dev, 'shell', 'su -c "cat /data/data/ru.mesh.expressive/shared_prefs/mesh_expressive_prefs.xml 2>/dev/null"']
+        res = subprocess.run(cmd, capture_output=True, text=True, timeout=5)
+        for t in re.findall(r'eyJ[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}', res.stdout):
+            if is_valid(t):
+                print(t)
+                exit(0)
+    except:
+        pass
+"#;
+        let output = tokio::process::Command::new("python3")
+            .arg("-c")
+            .arg(script)
+            .output()
+            .await;
+
+        if let Ok(out) = output {
+            let tok = String::from_utf8_lossy(&out.stdout).trim().to_string();
+            if !tok.is_empty() {
+                self.set_token(tok.clone()).await;
+                if let Some(ref db) = self.db {
+                    let _ = db.set_setting("mesh_token", &tok);
+                }
+                Self::update_env_file("MESH_JWT_TOKEN", &tok);
+                info!("Успешно получен свежий токен с устройства через ADB!");
+                return Ok(Some(tok));
+            }
+        }
+        Ok(None)
+    }
+
+    /// Единый метод обновления токена МЭШ со всеми резервными цепочками
+    pub async fn try_refresh(&self) -> Result<Option<String>> {
+        // 1. Приоритет: официальный refresh токена АУПД /v3/token/refresh
+        if let Ok(Some(tok)) = self.refresh_token_v3().await {
+            return Ok(Some(tok));
+        }
+
+        // 2. Резерв: sudir SSO cookies flow
+        if let Ok(Some(tok)) = self.try_refresh_sudir().await {
+            return Ok(Some(tok));
+        }
+
+        // 3. Резерв: извлечение из приложения mesh_expressive на подключенном телефоне
+        if let Ok(Some(tok)) = self.refresh_from_adb_device().await {
+            return Ok(Some(tok));
+        }
+
+        warn!("Все методы автообновления токена не дали результата");
+        Ok(None)
+    }
+
+    /// Превентивное автообновление, если до истечения токена осталось менее 30 минут
+    pub async fn check_and_proactive_refresh(&self) -> Result<bool> {
+        let token = self.jwt_token.read().await;
+        if Self::check_jwt_expires_within(&token, 1800) {
+            drop(token);
+            info!("МЭШ токен истекает менее чем через 30 минут. Превентивное автообновление...");
+            let res = self.try_refresh().await?;
+            return Ok(res.is_some());
+        }
+        Ok(false)
+    }
+
+    pub fn check_jwt_expires_within(token: &str, seconds: i64) -> bool {
+        let parts: Vec<&str> = token.split('.').collect();
+        if parts.len() < 2 {
+            return true;
+        }
+
+        let payload_part = parts[1];
+        let padded = match payload_part.len() % 4 {
+            2 => format!("{}==", payload_part),
+            3 => format!("{}=", payload_part),
+            _ => payload_part.to_string(),
+        };
+
+        let decoded = match URL_SAFE_NO_PAD.decode(padded.trim_end_matches('=')) {
+            Ok(bytes) => bytes,
+            Err(_) => return true,
+        };
+
+        if let Ok(val) = serde_json::from_slice::<Value>(&decoded) {
+            if let Some(exp) = val.get("exp").and_then(|e| e.as_i64()) {
+                let current_time = Utc::now().timestamp();
+                return current_time >= (exp - seconds);
+            }
+        }
+
+        true
+    }
+
+    pub async fn save_tokens(&self, access_token: &str, refresh_token: &str) {
+        if let Some(ref db) = self.db {
+            let _ = db.set_setting("mesh_token", access_token);
+            let _ = db.set_setting("mesh_refresh_token", refresh_token);
+        }
+        Self::update_env_file("MESH_JWT_TOKEN", access_token);
+        Self::update_env_file("MESH_REFRESH_TOKEN", refresh_token);
+    }
+
+    pub fn update_env_file(key: &str, value: &str) {
+        let paths = [
+            ".env",
+            "/root/projects/mesh-homework-bot/.env",
+            "/home/ametist1337/projects/mesh-homework-bot/.env",
+        ];
+        for p in &paths {
+            let path = std::path::Path::new(p);
+            if path.exists() {
+                if let Ok(content) = std::fs::read_to_string(path) {
+                    let mut lines: Vec<String> = content.lines().map(|s| s.to_string()).collect();
+                    let prefix = format!("{}=", key);
+                    let mut found = false;
+                    for l in &mut lines {
+                        if l.starts_with(&prefix) {
+                            *l = format!("{}{}", prefix, value);
+                            found = true;
+                            break;
+                        }
+                    }
+                    if !found {
+                        lines.push(format!("{}{}", prefix, value));
+                    }
+                    let _ = std::fs::write(path, lines.join("\n") + "\n");
+                }
+            }
+        }
+    }
+
+    pub fn extract_refresh_token_from_cookie(cookie_str: &str) -> Option<String> {
+        for part in cookie_str.split(';') {
+            let p = part.trim();
+            if let Some(val) = p.strip_prefix("aupd_refresh_token=") {
+                let clean = val.split(';').next().unwrap_or(val).trim();
+                if clean.len() > 20 {
+                    return Some(clean.to_string());
+                }
+            }
+        }
+        None
     }
 
     /// Полноценное обновление сессии через school.mos.ru/v3/auth/sudir/login flow
@@ -484,7 +776,7 @@ mod tests {
             return;
         }
 
-        let client = MeshClient::new(token, student_id, String::new()).unwrap();
+        let client = MeshClient::new(token, None, student_id, String::new(), None).unwrap();
         let today = chrono::Local::now().date_naive();
         let events = client
             .get_events(

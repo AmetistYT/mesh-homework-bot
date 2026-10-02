@@ -20,6 +20,7 @@ pub struct TelegramMessage {
     pub from: Option<TelegramUser>,
     pub chat: TelegramChat,
     pub text: Option<String>,
+    pub caption: Option<String>,
     pub date: i64,
     pub reply_to_message: Option<Box<TelegramMessage>>,
 }
