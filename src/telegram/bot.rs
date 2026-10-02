@@ -20,6 +20,7 @@ pub enum BotCommandEvent {
     SolveForDay {
         chat_id: String,
         target: TargetDay,
+        reply_to_message_id: Option<i64>,
     },
     ForceCheck,
 }
@@ -312,9 +313,11 @@ impl BotHandler {
                     let _ = self.tg.send_message(chat_id, &format!("Ищу задания на {} и запускаю решение...", target_name)).await;
                 }
 
+                let _ = self.tg.set_message_reaction(chat_id, message_id, Some("👀")).await;
                 let _ = self.event_tx.send(BotCommandEvent::SolveForDay {
                     chat_id: chat_id.to_string(),
                     target,
+                    reply_to_message_id: Some(message_id),
                 }).await;
             }
             "/status" | "/status@ew1484_bot" => {
@@ -440,6 +443,8 @@ impl BotHandler {
             return;
         }
 
+        let _ = self.tg.set_message_reaction(chat_id, message_id, Some("👀")).await;
+
         let trimmed = text.trim();
         let lower = trimmed.to_lowercase();
         let first_word = lower.split_whitespace().next().unwrap_or("");
@@ -532,8 +537,10 @@ impl BotHandler {
                         msg
                     };
                     let _ = self.tg.send_message_reply(chat_id, &text, Some(message_id)).await;
+                    let _ = self.tg.set_message_reaction(chat_id, message_id, Some("👍")).await;
                 }
                 Err(e) => {
+                    let _ = self.tg.set_message_reaction(chat_id, message_id, None).await;
                     let _ = self
                         .tg
                         .send_message_reply(chat_id, &format!("Ошибка снятия ограничений: {}", e), Some(message_id))
@@ -561,8 +568,10 @@ impl BotHandler {
                         msg
                     };
                     let _ = self.tg.send_message_reply(chat_id, &text, Some(message_id)).await;
+                    let _ = self.tg.set_message_reaction(chat_id, message_id, Some("👍")).await;
                 }
                 Err(e) => {
+                    let _ = self.tg.set_message_reaction(chat_id, message_id, None).await;
                     let _ = self
                         .tg
                         .send_message_reply(chat_id, &format!("Ошибка блокировки: {}", e), Some(message_id))
@@ -614,8 +623,10 @@ impl BotHandler {
                     target_mention, duration_human
                 );
                 let _ = self.tg.send_message_reply(chat_id, &confirmation, Some(message_id)).await;
+                let _ = self.tg.set_message_reaction(chat_id, message_id, Some("👍")).await;
             }
             Err(e) => {
+                let _ = self.tg.set_message_reaction(chat_id, message_id, None).await;
                 let _ = self
                     .tg
                     .send_message_reply(
@@ -700,11 +711,27 @@ impl BotHandler {
         let db = self.db.clone();
         let chat_id_str = chat_id.to_string();
 
+        let _ = self.tg.set_message_reaction(chat_id, message_id, Some("👀")).await;
+        let _ = self.tg.send_chat_action(chat_id, "typing").await;
+
         tokio::spawn(async move {
-            match solver.ask_chat(&prompt, "gemini-3.8-flash-medium", Some(&chat_id_str)).await {
+            let tg_typing = tg.clone();
+            let cid_typing = chat_id_str.clone();
+            let typing_task = tokio::spawn(async move {
+                loop {
+                    tokio::time::sleep(tokio::time::Duration::from_secs(4)).await;
+                    let _ = tg_typing.send_chat_action(&cid_typing, "typing").await;
+                }
+            });
+
+            let res = solver.ask_chat(&prompt, "gemini-3.8-flash-medium", Some(&chat_id_str)).await;
+            typing_task.abort();
+
+            match res {
                 Ok(reply) => {
                     let clean = reply.replace("```telegram_action", "").trim().to_string();
                     let sent_id = tg.send_message_reply(&chat_id_str, &clean, Some(message_id)).await.ok();
+                    let _ = tg.set_message_reaction(&chat_id_str, message_id, Some("👍")).await;
                     if let Some(sid) = sent_id {
                         let _ = db.save_chat_message(
                             &chat_id_str,
@@ -721,6 +748,7 @@ impl BotHandler {
                     }
                 }
                 Err(e) => {
+                    let _ = tg.set_message_reaction(&chat_id_str, message_id, None).await;
                     let _ = tg
                         .send_message_reply(
                             &chat_id_str,
@@ -907,6 +935,9 @@ impl BotHandler {
         }
 
         info!("Получен запрос к AI чату (msg_id: {}): '{}'", message_id, query);
+
+        let _ = self.tg.set_message_reaction(chat_id, message_id, Some("👀")).await;
+        let _ = self.tg.send_chat_action(chat_id, "typing").await;
 
         // Проверяем, не является ли запрос просьбой разобрать спор в чате
         if is_dispute_query(&query) {
@@ -1112,7 +1143,17 @@ impl BotHandler {
         let temp_photo_cleanup = downloaded_photo.clone();
 
         tokio::spawn(async move {
+            let tg_typing = tg_client.clone();
+            let cid_typing = chat_id_str.clone();
+            let typing_task = tokio::spawn(async move {
+                loop {
+                    tokio::time::sleep(tokio::time::Duration::from_secs(4)).await;
+                    let _ = tg_typing.send_chat_action(&cid_typing, "typing").await;
+                }
+            });
+
             let res = solver.ask_chat(&prompt, "gemini-3.8-flash-medium", Some(&chat_id_str)).await;
+            typing_task.abort();
 
             // Удаляем временный файл входящего фото после ответа модели
             if let Some(ref p) = temp_photo_cleanup {
@@ -1152,6 +1193,7 @@ impl BotHandler {
                                     clean_reply
                                 };
                                 let sent_id = tg_client.send_message_reply(&chat_id_str, &final_msg, Some(message_id)).await.ok();
+                                let _ = tg_client.set_message_reaction(&chat_id_str, message_id, Some("👍")).await;
                                 if let Some(sid) = sent_id {
                                     let _ = db_cl.save_chat_message(
                                         &chat_id_str,
@@ -1168,6 +1210,7 @@ impl BotHandler {
                                 }
                             }
                             Err(e) => {
+                                let _ = tg_client.set_message_reaction(&chat_id_str, message_id, None).await;
                                 let err_msg = format!("Ошибка выполнения модерации: {}", e);
                                 let _ = tg_client.send_message_reply(&chat_id_str, &err_msg, Some(message_id)).await;
                             }
@@ -1191,6 +1234,7 @@ impl BotHandler {
                                     Ok(pid) => {
                                         sent_via_photo = true;
                                         let _ = tokio::fs::remove_file(photo_path).await;
+                                        let _ = tg_client.set_message_reaction(&chat_id_str, message_id, Some("👍")).await;
                                         let _ = db_cl.save_chat_message(
                                             &chat_id_str,
                                             pid,
@@ -1214,6 +1258,7 @@ impl BotHandler {
 
                         if !sent_via_photo {
                             let sent_id = tg_client.send_message_reply(&chat_id_str, &final_msg, Some(message_id)).await.ok();
+                            let _ = tg_client.set_message_reaction(&chat_id_str, message_id, Some("👍")).await;
                             if let Some(sid) = sent_id {
                                 let _ = db_cl.save_chat_message(
                                     &chat_id_str,
@@ -1232,6 +1277,7 @@ impl BotHandler {
                     }
                 }
                 Err(e) => {
+                    let _ = tg_client.set_message_reaction(&chat_id_str, message_id, None).await;
                     warn!("Ошибка генерации ответа в AI чате: {:#}", e);
                     let _ = tg_client
                         .send_message_reply(

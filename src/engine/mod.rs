@@ -97,19 +97,19 @@ impl Engine {
                         if last_auto_run_date != Some(today) {
                             last_auto_run_date = Some(today);
                             info!("Ежедневный автозапуск в 15:00: решение ДЗ на завтра!");
-                            self.solve_and_publish_day(TargetDay::Tomorrow, &self.channel_id).await;
+                            self.solve_and_publish_day(TargetDay::Tomorrow, &self.channel_id, None).await;
                         }
                     }
                 }
                 Some(event) = event_rx.recv() => {
                     match event {
-                        BotCommandEvent::SolveForDay { chat_id, target } => {
+                        BotCommandEvent::SolveForDay { chat_id, target, reply_to_message_id } => {
                             info!("Получена команда решения ДЗ для {:?}", target);
-                            self.solve_and_publish_day(target, &chat_id).await;
+                            self.solve_and_publish_day(target, &chat_id, reply_to_message_id).await;
                         }
                         BotCommandEvent::ForceCheck => {
                             info!("Получена команда принудительной проверки заданий");
-                            self.solve_and_publish_day(TargetDay::Tomorrow, &self.channel_id).await;
+                            self.solve_and_publish_day(TargetDay::Tomorrow, &self.channel_id, None).await;
                         }
                     }
                 }
@@ -138,7 +138,7 @@ impl Engine {
         }
     }
 
-    pub async fn solve_and_publish_day(&self, target: TargetDay, chat_id: &str) {
+    pub async fn solve_and_publish_day(&self, target: TargetDay, chat_id: &str, reply_to_message_id: Option<i64>) {
         info!("=== Начало обработки ДЗ для {:?} ===", target);
 
         self.unpin_expired_messages().await;
@@ -164,6 +164,9 @@ impl Engine {
                     .tg
                     .send_message(chat_id, &format!("Ошибка получения данных из МЭШ: {}", e))
                     .await;
+                if let Some(mid) = reply_to_message_id {
+                    let _ = self.tg.set_message_reaction(chat_id, mid, None).await;
+                }
                 return;
             }
         };
@@ -186,6 +189,9 @@ impl Engine {
                 let pretty_date = Self::format_russian_date(&date_str);
                 let msg = format!("{}:\nВ электронном дневнике МЭШ заданий нет.", pretty_date);
                 let _ = self.tg.send_message(chat_id, &msg).await;
+                if let Some(mid) = reply_to_message_id {
+                    let _ = self.tg.set_message_reaction(chat_id, mid, Some("👍")).await;
+                }
                 return;
             }
         }
@@ -431,5 +437,8 @@ impl Engine {
         }
 
         info!("=== Обработка ДЗ завершена ===");
+        if let Some(mid) = reply_to_message_id {
+            let _ = self.tg.set_message_reaction(target_chat, mid, Some("👍")).await;
+        }
     }
 }

@@ -4,7 +4,7 @@ use reqwest::Client;
 use serde::{Deserialize, Serialize};
 use serde_json::json;
 use std::path::Path;
-use tracing::info;
+use tracing::{info, warn};
 
 #[allow(dead_code)]
 #[derive(Debug, Clone, Deserialize)]
@@ -510,6 +510,55 @@ impl TelegramClient {
         }
         let bytes = resp.bytes().await?;
         tokio::fs::write(&target_path, bytes).await?;
+        Ok(())
+    }
+
+    pub async fn set_message_reaction(&self, chat_id: &str, message_id: i64, emoji: Option<&str>) -> Result<()> {
+        let reaction_val = if let Some(e) = emoji {
+            serde_json::json!([{"type": "emoji", "emoji": e}])
+        } else {
+            serde_json::json!([])
+        };
+
+        let payload = serde_json::json!({
+            "chat_id": chat_id,
+            "message_id": message_id,
+            "reaction": reaction_val
+        });
+
+        let resp = self
+            .client
+            .post(self.api_url("setMessageReaction"))
+            .json(&payload)
+            .send()
+            .await?;
+
+        let res: TelegramApiResponse<bool> = resp.json().await?;
+        if !res.ok {
+            warn!("Не удалось поставить реакцию в Telegram: {:?}", res.description);
+        }
+
+        Ok(())
+    }
+
+    pub async fn send_chat_action(&self, chat_id: &str, action: &str) -> Result<()> {
+        let payload = serde_json::json!({
+            "chat_id": chat_id,
+            "action": action
+        });
+
+        let resp = self
+            .client
+            .post(self.api_url("sendChatAction"))
+            .json(&payload)
+            .send()
+            .await?;
+
+        let res: TelegramApiResponse<bool> = resp.json().await?;
+        if !res.ok {
+            warn!("Не удалось отправить sendChatAction: {:?}", res.description);
+        }
+
         Ok(())
     }
 
