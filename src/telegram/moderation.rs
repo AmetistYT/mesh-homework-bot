@@ -9,10 +9,15 @@ use crate::telegram::client::{ChatAdminRights, ChatPermissions, TelegramClient};
 
 #[derive(Debug, Clone, Deserialize, Serialize, Default)]
 pub struct TelegramActionRequest {
-    pub action: String, // "restrict", "ban", "unban", "restore"
-    pub target: Option<String>, // "@username", "123456", "reply"
+    pub action: String, // "restrict", "ban", "unban", "restore", "promote", "admin"
+    pub target: Option<String>, // "@username", "123456", "reply", "@all", "все"
+    pub targets: Option<Vec<String>>,
+    pub exclude: Option<Vec<String>>,
+    pub copy_from: Option<String>,
     pub duration_seconds: Option<u64>,
     pub permissions: Option<ChatPermissions>,
+    pub admin_rights: Option<ChatAdminRights>,
+    pub custom_title: Option<String>,
     #[serde(default)]
     pub restore_previous_after: bool,
 }
@@ -78,6 +83,64 @@ impl ModerationManager {
         (None, text.to_string())
     }
 
+    pub fn parse_target_and_exclusions(
+        target_raw: &str,
+        exclude_raw: Option<&[String]>,
+    ) -> (String, Vec<String>) {
+        let mut exclusions = Vec::new();
+        if let Some(exs) = exclude_raw {
+            for e in exs {
+                let clean = e.trim_start_matches('@').trim().to_lowercase();
+                if !clean.is_empty() && !exclusions.contains(&clean) {
+                    exclusions.push(clean);
+                }
+            }
+        }
+
+        let lower = target_raw.to_lowercase();
+        let mut main_target = target_raw.trim().to_string();
+
+        if let Some(pos) = lower.find("кроме") {
+            let (target_part, except_part) = target_raw.split_at(pos);
+            main_target = target_part.trim().trim_end_matches(',').trim().to_string();
+            let after_except = &except_part["кроме".len()..];
+            for token in after_except.split(|c: char| c == ',' || c.is_whitespace()) {
+                let clean = token.trim().trim_start_matches('@').trim_end_matches(',').trim().to_lowercase();
+                if !clean.is_empty() && !exclusions.contains(&clean) {
+                    exclusions.push(clean);
+                }
+            }
+        } else if let Some(pos) = lower.find("except") {
+            let (target_part, except_part) = target_raw.split_at(pos);
+            main_target = target_part.trim().trim_end_matches(',').trim().to_string();
+            let after_except = &except_part["except".len()..];
+            for token in after_except.split(|c: char| c == ',' || c.is_whitespace()) {
+                let clean = token.trim().trim_start_matches('@').trim_end_matches(',').trim().to_lowercase();
+                if !clean.is_empty() && !exclusions.contains(&clean) {
+                    exclusions.push(clean);
+                }
+            }
+        }
+
+        (main_target, exclusions)
+    }
+
+    pub fn is_bulk_target(t: &str) -> bool {
+        let s = t.trim_start_matches('@').trim().to_lowercase();
+        s == "all"
+            || s == "все"
+            || s == "всем"
+            || s == "всей группе"
+            || s == "все участники"
+            || s == "всем участникам"
+            || s == "каждому"
+            || s == "everybody"
+            || s == "everyone"
+            || s.starts_with("все ")
+            || s.starts_with("всем ")
+            || s.starts_with("all ")
+    }
+
     /// Определение целевого user_id по username, reply, имени или ID
     pub async fn resolve_target_user(
         tg: &TelegramClient,
@@ -86,9 +149,25 @@ impl ModerationManager {
         target_str: Option<&str>,
         reply_user: Option<(i64, Option<String>, Option<String>)>, // id, username, first_name
     ) -> Result<(i64, Option<String>)> {
+        let bot_id = tg.bot_id();
+        let reply_user = if let Some(ru) = reply_user {
+            if ru.0 == bot_id {
+                None
+            } else {
+                Some(ru)
+            }
+        } else {
+            None
+        };
+
         let t = target_str.unwrap_or("").trim();
         let t_clean = t.trim_start_matches('@').trim();
         let t_lower = t_clean.to_lowercase();
+
+        // Проверяем, не пытается ли явно указать бота
+        if t_lower == "ew1484_bot" || t_clean == bot_id.to_string() {
+            return Err(anyhow!("Невозможно применить действие модерации к самому боту."));
+        }
 
         // 1. Если явно указан "reply" или цель пустая / местоимение при наличии reply
         let is_reply_keyword = t_lower.is_empty()
@@ -102,13 +181,20 @@ impl ModerationManager {
             || t_lower == "участник"
             || t_lower == "пользователь";
 
-        if is_reply_keyword && reply_user.is_some() {
-            let (uid, un, _) = reply_user.unwrap();
-            return Ok((uid, un));
+        if is_reply_keyword {
+            if let Some((uid, un, _)) = reply_user {
+                if uid == bot_id {
+                    return Err(anyhow!("Команда вызвана в ответ на сообщение бота. Укажите конкретного участника для модерации."));
+                }
+                return Ok((uid, un));
+            }
         }
 
         // 2. Если передан числовой ID (например "123456789")
         if let Ok(num_id) = t_clean.parse::<i64>() {
+            if num_id == bot_id {
+                return Err(anyhow!("Невозможно применить действие модерации к самому боту."));
+            }
             let un = if let Some((ru_id, ref ru_un, _)) = reply_user {
                 if ru_id == num_id {
                     ru_un.clone()
@@ -131,6 +217,9 @@ impl ModerationManager {
                 fn_low == t_lower || fn_low.contains(&t_lower) || t_lower.contains(&fn_low)
             });
             if matches_un || matches_fn {
+                if ru_id == bot_id {
+                    return Err(anyhow!("Невозможно применить действие модерации к самому боту."));
+                }
                 return Ok((ru_id, ru_un.clone()));
             }
         }
@@ -138,6 +227,9 @@ impl ModerationManager {
         // 4. Поиск по локальной базе данных seen_users (по username, first_name, last_name)
         if !t_clean.is_empty() {
             if let Ok(Some((uid, un))) = db.find_user_by_name_or_username(t_clean) {
+                if uid == bot_id {
+                    return Err(anyhow!("Невозможно применить действие модерации к самому боту."));
+                }
                 return Ok((uid, un.map(|u| format!("@{}", u.trim_start_matches('@')))));
             }
         }
@@ -159,6 +251,9 @@ impl ModerationManager {
                     });
 
                     if matches_un || matches_fn || matches_ln {
+                        if a.user.id == bot_id {
+                            return Err(anyhow!("Невозможно применить действие модерации к самому боту."));
+                        }
                         let _ = db.save_seen_user(
                             a.user.id,
                             a.user.username.as_deref(),
@@ -174,6 +269,9 @@ impl ModerationManager {
 
         // 6. Если ничего не нашли по имени, но команда была вызвана в ответ (reply) - используем автора сообщения
         if let Some((ru_id, ru_un, _)) = reply_user {
+            if ru_id == bot_id {
+                return Err(anyhow!("Команда вызвана в ответ на сообщение бота. Укажите конкретного участника для модерации."));
+            }
             return Ok((ru_id, ru_un));
         }
 
@@ -196,11 +294,37 @@ impl ModerationManager {
             return Ok("Отказано: управление правами и разрешениями участников доступно только @ametist1337.".to_string());
         }
 
+        // 1. Проверяем массовое действие (@all, все, exclude)
+        let target_raw = action.target.as_deref().unwrap_or("").trim();
+        let (main_target, mut exclusions) = Self::parse_target_and_exclusions(target_raw, action.exclude.as_deref());
+
+        if let Some(ref add_ex) = action.exclude {
+            for e in add_ex {
+                let cl = e.trim_start_matches('@').trim().to_lowercase();
+                if !cl.is_empty() && !exclusions.contains(&cl) {
+                    exclusions.push(cl);
+                }
+            }
+        }
+
+        let is_bulk = Self::is_bulk_target(&main_target)
+            || action.targets.as_ref().map_or(false, |ts| ts.len() > 1);
+
+        if is_bulk {
+            return Self::execute_bulk_action(tg, db, chat_id, action, &exclusions).await;
+        }
+
+        let resolved_target_str = if main_target.is_empty() {
+            action.target.as_deref()
+        } else {
+            Some(main_target.as_str())
+        };
+
         let (user_id, username_opt) = Self::resolve_target_user(
             tg,
             db,
             chat_id,
-            action.target.as_deref(),
+            resolved_target_str,
             reply_user,
         ).await?;
 
@@ -214,6 +338,35 @@ impl ModerationManager {
         );
 
         match action.action.to_lowercase().as_str() {
+            "promote" | "admin" | "grant_admin" => {
+                let mut rights = action.admin_rights.clone();
+                let mut title = action.custom_title.clone();
+
+                if let Some(ref cf) = action.copy_from {
+                    if let Ok((src_uid, _)) = Self::resolve_target_user(tg, db, chat_id, Some(cf), None).await {
+                        if let Ok(src_member) = tg.get_chat_member(chat_id, src_uid).await {
+                            if src_member.status == "administrator" || src_member.status == "creator" {
+                                rights = Some(src_member.to_admin_rights());
+                                if title.is_none() {
+                                    title = src_member.custom_title;
+                                }
+                            }
+                        }
+                    }
+                }
+
+                let final_rights = rights.unwrap_or_else(ChatAdminRights::all_rights);
+                tg.promote_chat_member(chat_id, user_id, &final_rights).await
+                    .context("Ошибка вызова promoteChatMember (проверьте, есть ли у бота право 'Назначение администраторов')")?;
+
+                if let Some(ref t) = title {
+                    if !t.trim().is_empty() {
+                        let _ = tg.set_chat_admin_custom_title(chat_id, user_id, t.trim()).await;
+                    }
+                }
+
+                Ok(format!("Пользователь {} успешно назначен администратором.", user_display))
+            }
             "restore" => {
                 Self::restore_user_permissions(tg, db, chat_id, user_id, username_opt.as_deref()).await
             }
@@ -374,6 +527,229 @@ impl ModerationManager {
             }
             _ => Err(anyhow!("Неизвестное действие: {}", action.action)),
         }
+    }
+
+    /// Массовое выполнение действий модерации (@all, все, список участников с исключениями)
+    pub async fn execute_bulk_action(
+        tg: &TelegramClient,
+        db: &Database,
+        chat_id: &str,
+        action: &TelegramActionRequest,
+        exclusions: &[String],
+    ) -> Result<String> {
+        let bot_id = tg.bot_id();
+        info!("Выполнение массового действия модерации '{}' в чате {}", action.action, chat_id);
+
+        // 1. Собираем всех известных участников чата
+        let mut candidates: Vec<(i64, Option<String>, String)> = Vec::new();
+        let mut seen_ids = std::collections::HashSet::new();
+
+        if let Ok(known_users) = db.get_all_known_users_in_chat(chat_id) {
+            for (uid, un, fn_) in known_users {
+                if seen_ids.insert(uid) {
+                    candidates.push((uid, un, fn_));
+                }
+            }
+        }
+
+        // 2. Добавляем администраторов чата
+        let admins = tg.get_chat_administrators(chat_id).await.unwrap_or_default();
+        let mut creator_id = None;
+        for a in &admins {
+            if a.status == "creator" {
+                creator_id = Some(a.user.id);
+            }
+            if seen_ids.insert(a.user.id) {
+                candidates.push((
+                    a.user.id,
+                    a.user.username.clone(),
+                    a.user.first_name.clone(),
+                ));
+            }
+        }
+
+        // 3. Если указаны конкретные цели в action.targets
+        if let Some(ref target_list) = action.targets {
+            for t in target_list {
+                if let Ok((uid, un)) = Self::resolve_target_user(tg, db, chat_id, Some(t), None).await {
+                    if seen_ids.insert(uid) {
+                        candidates.push((uid, un, t.clone()));
+                    }
+                }
+            }
+        }
+
+        // 4. Если источник прав - другой пользователь (copy_from)
+        let mut copy_admin_rights = None;
+        let mut copy_title = None;
+        let mut copy_perms = None;
+
+        if let Some(ref cf) = action.copy_from {
+            if let Ok((src_uid, _)) = Self::resolve_target_user(tg, db, chat_id, Some(cf), None).await {
+                if let Ok(src_member) = tg.get_chat_member(chat_id, src_uid).await {
+                    if src_member.status == "administrator" || src_member.status == "creator" {
+                        copy_admin_rights = Some(src_member.to_admin_rights());
+                        copy_title = src_member.custom_title.clone();
+                    } else if src_member.status == "restricted" {
+                        copy_perms = Some(ChatPermissions {
+                            can_send_messages: src_member.can_send_messages,
+                            can_send_audios: src_member.can_send_audios,
+                            can_send_documents: src_member.can_send_documents,
+                            can_send_photos: src_member.can_send_photos,
+                            can_send_videos: src_member.can_send_videos,
+                            can_send_video_notes: src_member.can_send_video_notes,
+                            can_send_voice_notes: src_member.can_send_voice_notes,
+                            can_send_polls: src_member.can_send_polls,
+                            can_send_other_messages: src_member.can_send_other_messages,
+                            can_add_web_page_previews: src_member.can_add_web_page_previews,
+                            can_change_info: src_member.can_change_info,
+                            can_invite_users: src_member.can_invite_users,
+                            can_pin_messages: src_member.can_pin_messages,
+                            can_manage_topics: src_member.can_manage_topics,
+                        });
+                    }
+                }
+            }
+        }
+
+        let is_user_excluded = |uid: i64, un: Option<&str>, fn_name: &str| -> bool {
+            if uid == bot_id {
+                return true;
+            }
+            if Some(uid) == creator_id {
+                return true;
+            }
+            let un_clean = un.map(|u| u.trim_start_matches('@').to_lowercase()).unwrap_or_default();
+            let fn_low = fn_name.to_lowercase();
+
+            for ex in exclusions {
+                let ex_clean = ex.trim_start_matches('@').trim().to_lowercase();
+                if ex_clean.is_empty() {
+                    continue;
+                }
+                if let Ok(ex_id) = ex_clean.parse::<i64>() {
+                    if ex_id == uid {
+                        return true;
+                    }
+                }
+                if !un_clean.is_empty() && un_clean == ex_clean {
+                    return true;
+                }
+                if !fn_low.is_empty() && (fn_low == ex_clean || fn_low.contains(&ex_clean) || ex_clean.contains(&fn_low)) {
+                    return true;
+                }
+            }
+            false
+        };
+
+        let mut success_count = 0;
+        let mut fail_count = 0;
+        let mut excluded_names = Vec::new();
+        let action_type = action.action.to_lowercase();
+
+        for (uid, un, fn_name) in candidates {
+            let user_display = un
+                .as_ref()
+                .map(|u| format!("@{}", u.trim_start_matches('@')))
+                .unwrap_or_else(|| {
+                    if !fn_name.trim().is_empty() {
+                        fn_name.clone()
+                    } else {
+                        format!("ID: {}", uid)
+                    }
+                });
+
+            if is_user_excluded(uid, un.as_deref(), &fn_name) {
+                if uid != bot_id && Some(uid) != creator_id {
+                    excluded_names.push(user_display);
+                }
+                continue;
+            }
+
+            match action_type.as_str() {
+                "promote" | "admin" | "grant_admin" => {
+                    let rights = copy_admin_rights
+                        .clone()
+                        .or_else(|| action.admin_rights.clone())
+                        .unwrap_or_else(ChatAdminRights::all_rights);
+
+                    match tg.promote_chat_member(chat_id, uid, &rights).await {
+                        Ok(_) => {
+                            let title = copy_title.as_deref().or(action.custom_title.as_deref());
+                            if let Some(t) = title {
+                                if !t.trim().is_empty() {
+                                    let _ = tg.set_chat_admin_custom_title(chat_id, uid, t.trim()).await;
+                                }
+                            }
+                            success_count += 1;
+                        }
+                        Err(e) => {
+                            warn!("Не удалось выдать права администратора пользователю {} ({}): {}", user_display, uid, e);
+                            fail_count += 1;
+                        }
+                    }
+                }
+                "restrict" => {
+                    let perms = copy_perms
+                        .clone()
+                        .or_else(|| action.permissions.clone())
+                        .unwrap_or_default();
+                    let until = action.duration_seconds.filter(|&s| s > 0).map(|s| {
+                        let now = Utc::now().timestamp();
+                        if s < 30 { now + 35 } else { now + s as i64 }
+                    });
+
+                    match tg.restrict_chat_member(chat_id, uid, &perms, until).await {
+                        Ok(_) => {
+                            success_count += 1;
+                        }
+                        Err(e) => {
+                            warn!("Не удалось ограничить пользователя {} ({}): {}", user_display, uid, e);
+                            fail_count += 1;
+                        }
+                    }
+                }
+                "restore" | "unban" => {
+                    match Self::restore_user_permissions(tg, db, chat_id, uid, un.as_deref()).await {
+                        Ok(_) => {
+                            success_count += 1;
+                        }
+                        Err(e) => {
+                            warn!("Не удалось восстановить пользователя {} ({}): {}", user_display, uid, e);
+                            fail_count += 1;
+                        }
+                    }
+                }
+                _ => {}
+            }
+        }
+
+        let mut res = match action_type.as_str() {
+            "promote" | "admin" | "grant_admin" => {
+                format!("Массовое назначение администраторов выполнено. Обновлено участников: {}.", success_count)
+            }
+            "restrict" => {
+                format!("Массовое изменение разрешений выполнено. Обновлено участников: {}.", success_count)
+            }
+            "restore" | "unban" => {
+                format!("Массовое восстановление прав выполнено. Обновлено участников: {}.", success_count)
+            }
+            _ => format!("Массовое действие выполнено для {} участников.", success_count),
+        };
+
+        if !excluded_names.is_empty() {
+            res.push_str(&format!(" Исключены: {}.", excluded_names.join(", ")));
+        }
+
+        if fail_count > 0 {
+            res.push_str(&format!(" Ошибок при обновлении: {} (проверьте права бота на назначение администраторов).", fail_count));
+        }
+
+        if success_count == 0 && fail_count == 0 {
+            res.push_str(" В базе данных бота пока нет других известных участников этой группы (кроме создателя и исключенных). Чтобы бот мог управлять участниками, они должны написать хотя бы одно сообщение в группу.");
+        }
+
+        Ok(res)
     }
 
     /// Восстановление исходных прав участника из сохраненного бэкапа
@@ -593,6 +969,23 @@ fn parse_action_loosely(json_str: &str) -> Option<TelegramActionRequest> {
             None
         }
     });
+    let targets = obj.get("targets").and_then(|v| {
+        if let Some(arr) = v.as_array() {
+            Some(arr.iter().filter_map(|x| x.as_str().map(|s| s.to_string())).collect())
+        } else {
+            None
+        }
+    });
+    let exclude = obj.get("exclude").and_then(|v| {
+        if let Some(arr) = v.as_array() {
+            Some(arr.iter().filter_map(|x| x.as_str().map(|s| s.to_string())).collect())
+        } else if let Some(s) = v.as_str() {
+            Some(vec![s.to_string()])
+        } else {
+            None
+        }
+    });
+    let copy_from = obj.get("copy_from").and_then(|v| v.as_str().map(|s| s.to_string()));
     let duration_seconds = obj.get("duration_seconds").and_then(|v| {
         if v.is_null() {
             None
@@ -611,12 +1004,21 @@ fn parse_action_loosely(json_str: &str) -> Option<TelegramActionRequest> {
     let permissions = obj.get("permissions").and_then(|v| {
         serde_json::from_value::<ChatPermissions>(v.clone()).ok()
     });
+    let admin_rights = obj.get("admin_rights").and_then(|v| {
+        serde_json::from_value::<ChatAdminRights>(v.clone()).ok()
+    });
+    let custom_title = obj.get("custom_title").and_then(|v| v.as_str().map(|s| s.to_string()));
 
     Some(TelegramActionRequest {
         action,
         target,
+        targets,
+        exclude,
+        copy_from,
         duration_seconds,
         permissions,
+        admin_rights,
+        custom_title,
         restore_previous_after,
     })
 }
@@ -688,5 +1090,45 @@ mod tests {
         let _ = db.save_seen_user(999999, Some("imran777"), "Имран", None);
         let res3 = ModerationManager::resolve_target_user(&tg, &db, "-100", Some("Имран"), None).await;
         assert_eq!(res3.unwrap(), (999999, Some("@imran777".to_string())));
+    }
+
+    #[test]
+    fn test_parse_target_and_exclusions() {
+        let (main, ex) = ModerationManager::parse_target_and_exclusions("все, кроме @AHzkto67", None);
+        assert_eq!(main, "все");
+        assert_eq!(ex, vec!["ahzkto67".to_string()]);
+
+        let (main2, ex2) = ModerationManager::parse_target_and_exclusions("@all except @user1, @user2", None);
+        assert_eq!(main2, "@all");
+        assert_eq!(ex2, vec!["user1".to_string(), "user2".to_string()]);
+
+        let (main3, ex3) = ModerationManager::parse_target_and_exclusions("все", Some(&["@excluded_one".to_string()]));
+        assert_eq!(main3, "все");
+        assert_eq!(ex3, vec!["excluded_one".to_string()]);
+    }
+
+    #[test]
+    fn test_is_bulk_target() {
+        assert!(ModerationManager::is_bulk_target("@all"));
+        assert!(ModerationManager::is_bulk_target("all"));
+        assert!(ModerationManager::is_bulk_target("все"));
+        assert!(ModerationManager::is_bulk_target("всем"));
+        assert!(ModerationManager::is_bulk_target("каждому"));
+        assert!(ModerationManager::is_bulk_target("всей группе"));
+        assert!(!ModerationManager::is_bulk_target("@user123"));
+        assert!(!ModerationManager::is_bulk_target("Имран"));
+    }
+
+    #[test]
+    fn test_extract_promote_action() {
+        let sample = "Готово!\n```telegram_action\n{\n  \"action\": \"promote\",\n  \"target\": \"@all\",\n  \"exclude\": [\"@AHzkto67\"],\n  \"copy_from\": \"@gussiavaffe\"\n}\n```\nВсе участники, кроме @AHzkto67, назначены администраторами с правами как у @gussiavaffe.";
+        let (action, clean) = ModerationManager::extract_action(sample);
+        assert!(action.is_some());
+        let a = action.unwrap();
+        assert_eq!(a.action, "promote");
+        assert_eq!(a.target.as_deref(), Some("@all"));
+        assert_eq!(a.exclude.as_ref().unwrap(), &vec!["@AHzkto67".to_string()]);
+        assert_eq!(a.copy_from.as_deref(), Some("@gussiavaffe"));
+        assert_eq!(clean, "Готово!\n\nВсе участники, кроме @AHzkto67, назначены администраторами с правами как у @gussiavaffe.");
     }
 }

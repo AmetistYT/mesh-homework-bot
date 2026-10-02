@@ -156,6 +156,28 @@ pub struct ChatAdminRights {
     pub can_manage_topics: Option<bool>,
 }
 
+impl ChatAdminRights {
+    pub fn all_rights() -> Self {
+        Self {
+            is_anonymous: Some(false),
+            can_manage_chat: Some(true),
+            can_delete_messages: Some(true),
+            can_manage_video_chats: Some(true),
+            can_restrict_members: Some(true),
+            can_promote_members: Some(true),
+            can_change_info: Some(true),
+            can_invite_users: Some(true),
+            can_post_messages: Some(true),
+            can_edit_messages: Some(true),
+            can_pin_messages: Some(true),
+            can_post_stories: Some(true),
+            can_edit_stories: Some(true),
+            can_delete_stories: Some(true),
+            can_manage_topics: Some(true),
+        }
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ChatMember {
     pub status: String,
@@ -189,6 +211,28 @@ pub struct ChatMember {
     pub until_date: Option<i64>,
 }
 
+impl ChatMember {
+    pub fn to_admin_rights(&self) -> ChatAdminRights {
+        ChatAdminRights {
+            is_anonymous: self.is_anonymous,
+            can_manage_chat: self.can_manage_chat,
+            can_delete_messages: self.can_delete_messages,
+            can_manage_video_chats: self.can_manage_video_chats,
+            can_restrict_members: self.can_restrict_members,
+            can_promote_members: self.can_promote_members,
+            can_change_info: self.can_change_info,
+            can_invite_users: self.can_invite_users,
+            can_post_messages: self.can_post_messages,
+            can_edit_messages: self.can_edit_messages,
+            can_pin_messages: self.can_pin_messages,
+            can_post_stories: self.can_post_stories,
+            can_edit_stories: self.can_edit_stories,
+            can_delete_stories: self.can_delete_stories,
+            can_manage_topics: self.can_manage_topics,
+        }
+    }
+}
+
 #[derive(Debug, Clone, Deserialize)]
 struct TelegramApiResponse<T> {
     pub ok: bool,
@@ -208,6 +252,14 @@ impl TelegramClient {
             client: Client::new(),
             bot_token,
         }
+    }
+
+    pub fn bot_id(&self) -> i64 {
+        self.bot_token
+            .split(':')
+            .next()
+            .and_then(|s| s.parse::<i64>().ok())
+            .unwrap_or(0)
     }
 
     fn api_url(&self, method: &str) -> String {
@@ -655,7 +707,7 @@ impl TelegramClient {
         let payload = json!({
             "chat_id": chat_id,
             "user_id": user_id,
-            "only_if_banned": false
+            "only_if_banned": true
         });
 
         let resp = self

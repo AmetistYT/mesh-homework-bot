@@ -440,6 +440,55 @@ impl Database {
         Ok(exact_match.or(partial_match))
     }
 
+    pub fn get_all_known_users_in_chat(&self, chat_id: &str) -> Result<Vec<(i64, Option<String>, String)>> {
+        let conn = self.conn.lock().unwrap();
+        let mut list = Vec::new();
+        let mut seen = std::collections::HashSet::new();
+
+        // 1. Из истории сообщений данного чата
+        if let Ok(mut stmt) = conn.prepare(
+            "SELECT DISTINCT user_id, username, full_name 
+             FROM chat_messages 
+             WHERE chat_id = ?1 AND user_id > 0
+             ORDER BY id DESC"
+        ) {
+            if let Ok(rows) = stmt.query_map(params![chat_id], |row| {
+                Ok((row.get(0)?, row.get(1)?, row.get(2)?))
+            }) {
+                for r in rows.flatten() {
+                    let (uid, un, fn_): (i64, Option<String>, String) = r;
+                    if seen.insert(uid) {
+                        list.push((uid, un, fn_));
+                    }
+                }
+            }
+        }
+
+        // 2. Из таблицы seen_users
+        if let Ok(mut stmt2) = conn.prepare("SELECT user_id, username, first_name, last_name FROM seen_users WHERE user_id > 0") {
+            if let Ok(rows2) = stmt2.query_map([], |row| {
+                let uid: i64 = row.get(0)?;
+                let un: Option<String> = row.get(1)?;
+                let fn_: String = row.get(2)?;
+                let ln: Option<String> = row.get(3)?;
+                let full = match ln {
+                    Some(l) if !l.trim().is_empty() => format!("{} {}", fn_, l),
+                    _ => fn_,
+                };
+                Ok((uid, un, full))
+            }) {
+                for r in rows2.flatten() {
+                    let (uid, un, fn_) = r;
+                    if seen.insert(uid) {
+                        list.push((uid, un, fn_));
+                    }
+                }
+            }
+        }
+
+        Ok(list)
+    }
+
     pub fn save_permission_backup(
         &self,
         chat_id: &str,

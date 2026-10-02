@@ -510,6 +510,7 @@ impl BotHandler {
                 duration_seconds: None,
                 permissions: None,
                 restore_previous_after: false,
+                ..Default::default()
             };
             match ModerationManager::execute_action(&self.tg, &self.db, chat_id, &action, reply_user, true).await {
                 Ok(msg) => {
@@ -538,6 +539,7 @@ impl BotHandler {
                 duration_seconds: duration,
                 permissions: None,
                 restore_previous_after: false,
+                ..Default::default()
             };
             match ModerationManager::execute_action(&self.tg, &self.db, chat_id, &action, reply_user, true).await {
                 Ok(msg) => {
@@ -590,6 +592,7 @@ impl BotHandler {
             duration_seconds: duration_secs,
             permissions: Some(perms),
             restore_previous_after: restore_prev,
+            ..Default::default()
         };
 
         match ModerationManager::execute_action(&self.tg, &self.db, chat_id, &action, reply_user, true).await {
@@ -895,40 +898,32 @@ impl BotHandler {
                 "ПРАВА УПРАВЛЕНИЯ ЧАТОМ И МОДЕРАЦИИ (ТОЛЬКО ДЛЯ @ametist1337):\n\
                  Запрос поступил от владельца/администратора (@ametist1337).\n\
                  {}\
-                 Ты имеешь право мутить, банить, менять любые разрешения (сообщения, музыка/аудио, медиа, стикеры и др.) или восстанавливать права участников чата.\n\
-                 Если пользователь @ametist1337 просит замутить, ограничить, забанить, снять права или вернуть права участнику (например: '!верни голос для Имран' или '!@user на 5 минут убрать все разрешения кроме музыки, потом вернуть все прежние'):\n\
+                 Ты имеешь право мутить, банить, менять любые разрешения (сообщения, музыка/аудио, медиа, стикеры и др.), назначать администраторов или восстанавливать права участников чата.\n\
+                 Если пользователь @ametist1337 просит замутить, ограничить, забанить, выдать админку, снять права или вернуть права (например: '!верни голос для Имран', '!@user на 5 минут убрать все разрешения кроме музыки, потом вернуть все прежние', '!дай всем в группе разрешения как у @gussiavaffe, с админкой и всеми разрешениями админки, кроме @AHzkto67'):\n\
                  ОБЯЗАТЕЛЬНО добавь в свой ответ блок:\n\
                  ```telegram_action\n\
                  {{\n\
-                   \"action\": \"restrict\",\n\
-                   \"target\": \"reply\",\n\
-                   \"duration_seconds\": 300,\n\
-                   \"permissions\": {{\n\
-                     \"can_send_messages\": false,\n\
-                     \"can_send_audios\": true,\n\
-                     \"can_send_documents\": false,\n\
-                     \"can_send_photos\": false,\n\
-                     \"can_send_videos\": false,\n\
-                     \"can_send_video_notes\": false,\n\
-                     \"can_send_voice_notes\": false,\n\
-                     \"can_send_polls\": false,\n\
-                     \"can_send_other_messages\": false,\n\
-                     \"can_add_web_page_previews\": false,\n\
-                     \"can_change_info\": false,\n\
-                     \"can_invite_users\": false,\n\
-                     \"can_pin_messages\": false,\n\
-                     \"can_manage_topics\": false\n\
-                   }},\n\
-                   \"restore_previous_after\": true\n\
+                   \"action\": \"promote\",\n\
+                   \"target\": \"@all\",\n\
+                   \"exclude\": [\"@AHzkto67\"],\n\
+                   \"copy_from\": \"@gussiavaffe\",\n\
+                   \"duration_seconds\": null,\n\
+                   \"restore_previous_after\": false\n\
                  }}\n\
                  ```\n\
                  ВАЖНО ДЛЯ БЛОКА telegram_action:\n\
                  1. JSON должен быть строго валидным, БЕЗ комментариев // и без лишних запятых.\n\
-                 2. action может быть: \"restrict\" (наложить ограничения или выдать голос/разрешения через permissions), \"restore\" (вернуть прежние права или снять все ограничения), \"ban\" (забанить), \"unban\" (разбанить).\n\
-                 3. target: \"reply\" (если команда вызвана в ответ на сообщение), либо @username, ID или имя участника.\n\
-                 4. duration_seconds: количество секунд (null если навсегда).\n\
-                 5. restore_previous_after: true если нужно вернуть прежние права (включая админку со всеми правами, если была) после истечения срока.\n\
-                 6. Обязательно напиши короткий, человечный текст ответа для чата без эмодзи, подтверждающий действие.\n\n",
+                 2. action может быть:\n\
+                    - \"promote\" (назначить администратором, применить полные права админа или скопировать права из copy_from)\n\
+                    - \"restrict\" (наложить ограничения или выдать определенные разрешения через permissions)\n\
+                    - \"restore\" (вернуть прежние права или снять все ограничения)\n\
+                    - \"ban\" (забанить), \"unban\" (разбанить).\n\
+                 3. target: \"reply\" (если команда вызвана в ответ на сообщение), @username, ID, имя участника, либо \"@all\" / \"все\" (для массового действия на всех участников чата).\n\
+                 4. exclude: массив строк участников, которых нужно исключить из действия (например [\"@AHzkto67\"]).\n\
+                 5. copy_from: username или ID участника, чьи права нужно скопировать (например \"@gussiavaffe\").\n\
+                 6. duration_seconds: количество секунд (null если навсегда).\n\
+                 7. restore_previous_after: true если нужно вернуть прежние права (включая админку со всеми правами, если была) после истечения срока.\n\
+                 8. Обязательно напиши короткий, человечный текст ответа для чата без эмодзи, подтверждающий действие.\n\n",
                 target_hint
             )
         } else {
