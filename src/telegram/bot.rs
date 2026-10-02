@@ -265,6 +265,7 @@ impl BotHandler {
                 /dz <день недели> - решение на любой день (пн, вт, ср, чт, пт, сб, вс)\n\
                 /dz сегодня - решение заданий на сегодня\n\
                 /status - текущее состояние сервиса и статистика\n\
+                /sync - синхронизация переписки через Telethon (админ)\n\
                 /check - принудительная проверка заданий (админ)\n\
                 /token <новый_jwt> - обновить JWT токен авторизации МЭШ\n\
                 /help - справка по командам";
@@ -371,6 +372,39 @@ impl BotHandler {
                 self.mesh.set_token(new_token.clone()).await;
                 let _ = self.db.set_setting("mesh_token", &new_token);
                 let _ = self.tg.send_message(chat_id, "МЭШ токен успешно обновлен и сохранен в базе данных.").await;
+            }
+            "/sync" | "/sync@ew1484_bot" | "/синхронизация" => {
+                if !is_admin && !is_ametist {
+                    let _ = self.tg.send_message(chat_id, "Команда доступна только администратору.").await;
+                    return;
+                }
+                let _ = self.tg.set_message_reaction(chat_id, message_id, Some("👀")).await;
+                let _ = self.tg.send_message(chat_id, "Запускаю синхронизацию истории сообщений чата через MTProto Telethon...").await;
+                let cid = chat_id.to_string();
+                let tg_cl = self.tg.clone();
+                tokio::spawn(async move {
+                    let out = tokio::process::Command::new("python3")
+                        .arg("scripts/sync_chat_history.py")
+                        .output()
+                        .await;
+                    match out {
+                        Ok(o) if o.status.success() => {
+                            let text = String::from_utf8_lossy(&o.stdout);
+                            let clean = text.lines().last().unwrap_or("Синхронизация завершена.");
+                            let _ = tg_cl.send_message(&cid, &format!("Синхронизация успешно завершена:\n{}", clean)).await;
+                            let _ = tg_cl.set_message_reaction(&cid, message_id, Some("👍")).await;
+                        }
+                        Ok(o) => {
+                            let err = String::from_utf8_lossy(&o.stderr);
+                            let _ = tg_cl.send_message(&cid, &format!("Ошибка синхронизации: {}", err)).await;
+                            let _ = tg_cl.set_message_reaction(&cid, message_id, None).await;
+                        }
+                        Err(e) => {
+                            let _ = tg_cl.send_message(&cid, &format!("Не удалось вызвать скрипт синхронизации: {}", e)).await;
+                            let _ = tg_cl.set_message_reaction(&cid, message_id, None).await;
+                        }
+                    }
+                });
             }
             "/schedule" | "/schedule@ew1484_bot" | "/расписание" | "/расписание@ew1484_bot" | "/lessons" | "/звонки" => {
                 let today = chrono::Local::now().date_naive();
@@ -1117,8 +1151,13 @@ impl BotHandler {
              10. Используй список участников и их приписки: понимай, к кому обращаются по имени (Имран, Игорь, Асыл, Варя, Семён, Демир, Тимофей, Алина и др.).\n\
              11. ПОЛНЫЙ ДОСТУП К ТЕРМИНАЛУ, БД И API БОТА:\n\
                  - В твоем распоряжении терминал сервера, Python 3, bash и база данных SQLite.\n\
-                 - Для любых аналитических и сложных запросов (например: 'топ по сообщениям', 'кто больше всех пишет', 'статистика активности', 'сколько сообщений у @user', 'выгрузи активность', 'кто чаще всего спорит') ты МОЖЕШЬ И ДОЛЖЕН писать и исполнять скрипты на Python или bash!\n\
-                 - В репозитории уже доступен готовый инструмент и CLI: `python3 scripts/bot_api.py top 20` (выводит красивый рейтинг участников по сообщениям с именами и приписками), `python3 scripts/bot_api.py stats`, `python3 scripts/bot_api.py sql \"SELECT ...\"`.\n\
+                 - Для любых аналитических и сложных запросов (например: 'топ по сообщениям', 'кто больше всех пишет', 'статистика активности', 'сколько сообщений у @user', 'выгрузи активность', 'кто чаще всего спорит', 'кто матерится', 'облако слов') ты МОЖЕШЬ И ДОЛЖЕН писать и исполнять скрипты на Python или bash!\n\
+                 - В репозитории уже доступны готовые инструменты и CLI:\n\
+                   • `python3 scripts/bot_api.py top 20` (выводит красивый рейтинг участников по сообщениям с именами и приписками)\n\
+                   • `python3 scripts/bot_api.py stats` (общая статистика чата)\n\
+                   • `python3 scripts/bot_api.py sync` (скачивает свежую историю переписки из чата Telegram через MTProto Telethon)\n\
+                   • `python3 scripts/generate_swear_visuals.py --send` (строит график и облако слов ненормативной лексики по всей истории переписки и отправляет в чат)\n\
+                   • `python3 scripts/bot_api.py sql \"SELECT ...\"` (прямые SQL-запросы к таблицам chat_messages, seen_users).\n\
                  - Переменные окружения: `$TELEGRAM_BOT_TOKEN` (токен бота для прямых вызовов Telegram API), `$TELEGRAM_CHAT_ID` (текущий чат), `$DB_PATH` (путь к базе `homeworks.db`).\n\
                  - Если требуется написать скрипт на Python или Rust для обработки данных — пиши, запускай его через run_command, получай результат и возвращай лаконичный и точный ответ в чат!\n\
              12. РАБОТА С ИЗОБРАЖЕНИЯМИ:\n\

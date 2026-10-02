@@ -322,9 +322,24 @@ def main():
     photo_p.add_argument("--chat-id", type=str, default=None)
     photo_p.add_argument("--reply-to", type=int, default=None)
 
+    # sync
+    sync_p = subparsers.add_parser("sync", help="Синхронизировать переписку через Telethon MTProto")
+    sync_p.add_argument("--chat-id", type=int, default=-1004469624876)
+    sync_p.add_argument("--limit", type=int, default=None)
+    sync_p.add_argument("--full", action="store_true")
+
     args = parser.parse_args()
 
-    if args.command == "top":
+    if args.command == "sync":
+        import asyncio
+        import sys
+        sys.path.insert(0, str(Path(__file__).parent.parent))
+        from scripts.sync_chat_history import sync_chat_history
+        min_id = None if args.full else None
+        cnt = asyncio.run(sync_chat_history(chat_id_int=args.chat_id, limit=args.limit, min_id=min_id))
+        print(f"Синхронизировано сообщений: {cnt}")
+
+    elif args.command == "top":
         top = get_top_senders(chat_id=args.chat_id, limit=args.limit, days=args.days)
         if args.json:
             print(json.dumps(top, ensure_ascii=False, indent=2))
