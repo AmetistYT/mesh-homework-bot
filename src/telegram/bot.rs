@@ -1006,63 +1006,76 @@ impl BotHandler {
             query.clone()
         };
 
+        let is_school = {
+            let low = query.to_lowercase();
+            low.contains("дз") || low.contains("дом") || low.contains("урок")
+            || low.contains("расписан") || low.contains("задан") || low.contains("звонк")
+            || low.contains("кабинет") || low.contains("школ") || low.contains("предмет")
+            || low.contains("понедельник") || low.contains("вторник") || low.contains("сред")
+            || low.contains("четверг") || low.contains("пятниц") || low.contains("суббот")
+            || low.contains("завтра") || low.contains("сегодня") || low.contains("послезавтра")
+            || low.contains("учител")
+        };
+
         let today = chrono::Local::now().date_naive();
-        let from_date = today - chrono::Duration::days(14);
-        let to_date = today + chrono::Duration::days(14);
+        let from_date = today - chrono::Duration::days(7);
+        let to_date = today + chrono::Duration::days(7);
 
-        let mesh_client = self.mesh.clone();
-        // Параллельно запрашиваем живые домашние задания и события календаря (расписание с таймингами)
-        let (live_hws_res, events_res) = tokio::join!(
-            mesh_client.get_homeworks(from_date, to_date),
-            mesh_client.get_events(from_date, to_date)
-        );
+        let (schedule_context, mesh_context, solutions_context) = if is_school {
+            let mesh_client = self.mesh.clone();
+            let (live_hws_res, events_res) = tokio::join!(
+                mesh_client.get_homeworks(from_date, to_date),
+                mesh_client.get_events(from_date, to_date)
+            );
 
-        let live_hws = live_hws_res.unwrap_or_default();
-        let events = events_res.unwrap_or_default();
+            let live_hws = live_hws_res.unwrap_or_default();
+            let events = events_res.unwrap_or_default();
+            let sched = format_schedule_context(&events);
 
-        let schedule_context = format_schedule_context(&events);
-
-        let mut mesh_context = String::new();
-        if !live_hws.is_empty() {
-            mesh_context.push_str(&format!(
-                "АКТУАЛЬНЫЕ ДОМАШНИЕ ЗАДАНИЯ ИЗ МЭШ (СЕГОДНЯ: {}, диапазон {} — {}):\n",
-                today.format("%d.%m.%Y"),
-                from_date.format("%d.%m.%Y"),
-                to_date.format("%d.%m.%Y")
-            ));
-            for hw in &live_hws {
-                let sub = hw.subject_name.as_deref().unwrap_or("Предмет");
-                let date = hw.date.as_deref().or(hw.lesson_date_time.as_deref()).unwrap_or("—");
-                let desc = hw.description.as_deref().unwrap_or("").trim();
-                let is_done_str = if hw.is_done.unwrap_or(false) { " (выполнено)" } else { "" };
-                mesh_context.push_str(&format!("• [{}] {}{}: {}\n", date, sub, is_done_str, desc));
-            }
-            mesh_context.push('\n');
-        }
-
-        // Получаем готовые решения из локальной базы данных
-        let recent_solutions = self.db.get_recent_solutions(15).unwrap_or_default();
-        let mut solutions_context = String::new();
-        if !recent_solutions.is_empty() {
-            solutions_context.push_str("БАЗА ГОТОВЫХ РЕШЕНИЙ ДОМАШНИХ ЗАДАНИЙ:\n");
-            for (sub, date, desc, sol) in recent_solutions {
-                solutions_context.push_str(&format!("--- ПРЕДМЕТ: {} (Срок: {}) ---\n", sub, date));
-                if !desc.trim().is_empty() {
-                    solutions_context.push_str(&format!("Задание: {}\n", desc.trim()));
+            let mut mc = String::new();
+            if !live_hws.is_empty() {
+                mc.push_str(&format!(
+                    "АКТУАЛЬНЫЕ ДОМАШНИЕ ЗАДАНИЯ ИЗ МЭШ (СЕГОДНЯ: {}, диапазон {} — {}):\n",
+                    today.format("%d.%m.%Y"),
+                    from_date.format("%d.%m.%Y"),
+                    to_date.format("%d.%m.%Y")
+                ));
+                for hw in &live_hws {
+                    let sub = hw.subject_name.as_deref().unwrap_or("Предмет");
+                    let date = hw.date.as_deref().or(hw.lesson_date_time.as_deref()).unwrap_or("—");
+                    let desc = hw.description.as_deref().unwrap_or("").trim();
+                    let is_done_str = if hw.is_done.unwrap_or(false) { " (выполнено)" } else { "" };
+                    mc.push_str(&format!("• [{}] {}{}: {}\n", date, sub, is_done_str, desc));
                 }
-                let short_sol: String = sol.chars().take(900).collect();
-                solutions_context.push_str(&format!("Решение:\n{}\n\n", short_sol));
+                mc.push('\n');
             }
-        }
+
+            let recent_solutions = self.db.get_recent_solutions(5).unwrap_or_default();
+            let mut sc = String::new();
+            if !recent_solutions.is_empty() {
+                sc.push_str("БАЗА ГОТОВЫХ РЕШЕНИЙ ДОМАШНИХ ЗАДАНИЙ:\n");
+                for (sub, date, desc, sol) in recent_solutions {
+                    sc.push_str(&format!("--- ПРЕДМЕТ: {} (Срок: {}) ---\n", sub, date));
+                    if !desc.trim().is_empty() {
+                        sc.push_str(&format!("Задание: {}\n", desc.trim()));
+                    }
+                    let short_sol: String = sol.chars().take(400).collect();
+                    sc.push_str(&format!("Решение:\n{}\n\n", short_sol));
+                }
+            }
+            (sched, mc, sc)
+        } else {
+            (String::new(), String::new(), String::new())
+        };
 
         // Загружаем привязку участников группы и карту титулов
         let (roster_context, title_map) = self.build_group_roster_context(chat_id).await;
 
-        // Загружаем недавний контекст истории диалога (до 200k токенов ~ 700k символов)
-        let chat_history = self.db.get_chat_history(chat_id, 1500, 700_000).unwrap_or_default();
+        // Загружаем недавний контекст истории диалога (40 последних сообщений для мгновенного ответа)
+        let chat_history = self.db.get_chat_history(chat_id, 40, 30_000).unwrap_or_default();
         let mut chat_history_context = String::new();
         if !chat_history.is_empty() {
-            chat_history_context.push_str("ИСТОРИЯ ПЕРЕПИСКИ В ЧАТЕ (контекст диалога, до 200k токенов):\n");
+            chat_history_context.push_str("ИСТОРИЯ ПЕРЕПИСКИ В ЧАТЕ (недавний контекст диалога):\n");
             for m in &chat_history {
                 if m.message_id == message_id {
                     continue;
@@ -1149,17 +1162,15 @@ impl BotHandler {
              8. Учитывай контекст предыдущего диалога: помни, о чем шла речь ранее в переписке, не начинай каждый раз с чистого листа.\n\
              9. Если спрашивают про дни недели или даты — сопоставь с текущей датой ({}) и расписанием МЭШ.\n\
              10. Используй список участников и их приписки: понимай, к кому обращаются по имени (Имран, Игорь, Асыл, Варя, Семён, Демир, Тимофей, Алина и др.).\n\
-             11. ПОЛНЫЙ ДОСТУП К ТЕРМИНАЛУ, БД И API БОТА:\n\
-                 - В твоем распоряжении терминал сервера, Python 3, bash и база данных SQLite.\n\
-                 - Для любых аналитических и сложных запросов (например: 'топ по сообщениям', 'кто больше всех пишет', 'статистика активности', 'сколько сообщений у @user', 'выгрузи активность', 'кто чаще всего спорит', 'кто матерится', 'облако слов') ты МОЖЕШЬ И ДОЛЖЕН писать и исполнять скрипты на Python или bash!\n\
-                 - В репозитории уже доступны готовые инструменты и CLI:\n\
-                   • `python3 scripts/bot_api.py top 20` (выводит красивый рейтинг участников по сообщениям с именами и приписками)\n\
+             11. СТРОГИЙ РЕЖИМ РАБОТЫ И ИНСТРУМЕНТЫ:\n\
+                 - КАТЕГОРИЧЕСКИ ЗАПРЕЩЕНО вызывать любые консольные инструменты, bash, run_command, git, ls, grep или читать файлы проекта для обычных вопросов! На любые обычные сообщения, общение, шутки, мемы, школьные вопросы, приветствия и реакцию на фото — ТЫ ОБЯЗАН СРАЗУ ВЫДАТЬ ПРЯМОЙ ЛАКОНИЧНЫЙ ТЕКСТ ОТВЕТА БЕЗ ЕДИНОГО ТУЛА!\n\
+                 - Использовать терминал и Python разрешено ИСКЛЮЧИТЕЛЬНО для глубоких аналитических запросов ('топ сообщений', 'статистика', 'облако слов', 'график', 'sql'):\n\
+                   • `python3 scripts/bot_api.py top 20` (выводит красивый рейтинг участников по сообщениям)\n\
                    • `python3 scripts/bot_api.py stats` (общая статистика чата)\n\
-                   • `python3 scripts/bot_api.py sync` (скачивает свежую историю переписки из чата Telegram через MTProto Telethon)\n\
-                   • `python3 scripts/generate_swear_visuals.py --send` (строит график и облако слов ненормативной лексики по всей истории переписки и отправляет в чат)\n\
-                   • `python3 scripts/bot_api.py sql \"SELECT ...\"` (прямые SQL-запросы к таблицам chat_messages, seen_users).\n\
-                 - Переменные окружения: `$TELEGRAM_BOT_TOKEN` (токен бота для прямых вызовов Telegram API), `$TELEGRAM_CHAT_ID` (текущий чат), `$DB_PATH` (путь к базе `homeworks.db`).\n\
-                 - Если требуется написать скрипт на Python или Rust для обработки данных — пиши, запускай его через run_command, получай результат и возвращай лаконичный и точный ответ в чат!\n\
+                   • `python3 scripts/bot_api.py sync` (скачивает свежую историю переписки через Telethon)\n\
+                   • `python3 scripts/generate_swear_visuals.py --send` (строит график и облако слов ненормативной лексики по всей базе и отправляет в чат)\n\
+                   • `python3 scripts/bot_api.py sql \"SELECT ...\"` (прямые SQL-запросы к chat_messages).\n\
+                 - Переменные окружения: `$TELEGRAM_BOT_TOKEN`, `$TELEGRAM_CHAT_ID`, `$DB_PATH`.\n\
              12. РАБОТА С ИЗОБРАЖЕНИЯМИ:\n\
                  - Если в вопросе пользователя есть строка `*прикреплено: /путь/к/файлу.jpg*`, значит к запросу прикреплена картинка. Файл доступен на диске сервера: ты можешь проанализировать его, использовать скрипты на Python (например, PIL/tesseract) или консольные утилиты.\n\
                  - Если ты хочешь отправить в чат сгенерированное изображение/график/чертеж: сохрани картинку в файл (например, в `/tmp/plot.png`) и укажи в своем ответе: `*прикреплено: /tmp/plot.png*` (бот автоматически отправит фото в чат и удалит временный файл), либо отправь напрямую вызовом `python3 scripts/bot_api.py send_photo /tmp/plot.png`.\n\
@@ -1173,6 +1184,20 @@ impl BotHandler {
             user_query_formatted,
             today.format("%d.%m.%Y (%A)")
         );
+
+        let requires_tools = {
+            let q_lower = query.to_lowercase();
+            q_lower.contains("топ") || q_lower.contains("статистик") || q_lower.contains("скрипт")
+            || q_lower.contains("график") || q_lower.contains("облако") || q_lower.contains("sql")
+            || q_lower.contains("посчитай") || q_lower.contains("выгрузи") || q_lower.contains("пропарси")
+            || q_lower.contains("баз") || q_lower.contains("мат")
+        };
+
+        let target_model = if requires_tools {
+            "gemini-3.8-flash-medium"
+        } else {
+            "gemini-3.8-flash-low"
+        };
 
         let tg_client = self.tg.clone();
         let solver = self.solver.clone();
@@ -1191,7 +1216,7 @@ impl BotHandler {
                 }
             });
 
-            let res = solver.ask_chat(&prompt, "gemini-3.8-flash-medium", Some(&chat_id_str)).await;
+            let res = solver.ask_chat(&prompt, target_model, Some(&chat_id_str)).await;
             typing_task.abort();
 
             // Удаляем временный файл входящего фото после ответа модели
