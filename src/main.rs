@@ -100,10 +100,14 @@ async fn main() -> Result<()> {
     };
 
     info!("Модель solver (agy): {}", cfg.agy_model);
+    let project_dir = std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from("."));
     let solver_runner = SolverRunner::new(
         solver_mode,
         cfg.solver_timeout_secs,
         &cfg.textbooks_dir,
+        project_dir,
+        Some(cfg.tg_bot_token.clone()),
+        Some(cfg.db_path.clone()),
         cfg.agy_model.clone(),
     );
 

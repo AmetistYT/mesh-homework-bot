@@ -23,17 +23,35 @@ pub struct SolverRunner {
     mode: SolverMode,
     timeout_secs: u64,
     working_dir: PathBuf,
+    project_dir: PathBuf,
+    tg_bot_token: Option<String>,
+    db_path: Option<PathBuf>,
     model: String,
 }
 
 impl SolverRunner {
-    pub fn new<P: AsRef<Path>>(mode: SolverMode, timeout_secs: u64, working_dir: P, model: String) -> Self {
+    pub fn new<P: AsRef<Path>, Q: AsRef<Path>>(
+        mode: SolverMode,
+        timeout_secs: u64,
+        working_dir: P,
+        project_dir: Q,
+        tg_bot_token: Option<String>,
+        db_path: Option<PathBuf>,
+        model: String,
+    ) -> Self {
         Self {
             mode,
             timeout_secs,
             working_dir: working_dir.as_ref().to_path_buf(),
+            project_dir: project_dir.as_ref().to_path_buf(),
+            tg_bot_token,
+            db_path,
             model,
         }
+    }
+
+    pub fn model(&self) -> &str {
+        &self.model
     }
 
     pub async fn solve(&self, prompt: &str) -> Result<String> {
@@ -64,18 +82,18 @@ impl SolverRunner {
         }
     }
 
-    pub async fn ask_chat(&self, prompt: &str, model: &str) -> Result<String> {
+    pub async fn ask_chat(&self, prompt: &str, model: &str, chat_id: Option<&str>) -> Result<String> {
         info!("Запрос к нейросети через agy (чат, модель: {})...", model);
 
         let run_fut = async {
             match &self.mode {
-                SolverMode::Local { agy_bin } => self.solve_local_chat(agy_bin, prompt, model).await,
+                SolverMode::Local { agy_bin } => self.solve_local_chat(agy_bin, prompt, model, chat_id).await,
                 SolverMode::RemoteSsh {
                     host,
                     user,
                     port,
                     agy_bin,
-                } => self.solve_ssh_chat(host, user, *port, agy_bin, prompt, model).await,
+                } => self.solve_ssh_chat(host, user, *port, agy_bin, prompt, model, chat_id).await,
             }
         };
 
@@ -88,7 +106,7 @@ impl SolverRunner {
         }
     }
 
-    async fn solve_local_chat(&self, agy_bin: &str, prompt: &str, model: &str) -> Result<String> {
+    async fn solve_local_chat(&self, agy_bin: &str, prompt: &str, model: &str, chat_id: Option<&str>) -> Result<String> {
         let bin_path = if std::path::Path::new(agy_bin).is_absolute() && std::path::Path::new(agy_bin).exists() {
             agy_bin.to_string()
         } else if std::path::Path::new("/usr/local/bin/agy").exists() {
@@ -99,7 +117,10 @@ impl SolverRunner {
             agy_bin.to_string()
         };
 
-        let run_dir = if self.working_dir.exists() {
+        // Для чата и скриптов используем каталог проекта бота (где доступны scripts/, data/, cargo)
+        let run_dir = if self.project_dir.exists() {
+            self.project_dir.clone()
+        } else if self.working_dir.exists() {
             self.working_dir.clone()
         } else {
             std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."))
@@ -110,7 +131,18 @@ impl SolverRunner {
             .arg("--model")
             .arg(model)
             .env("LANG", "en_US.UTF-8")
-            .env("LC_ALL", "en_US.UTF-8")
+            .env("LC_ALL", "en_US.UTF-8");
+
+        if let Some(token) = &self.tg_bot_token {
+            cmd.env("TELEGRAM_BOT_TOKEN", token);
+        }
+        if let Some(db_path) = &self.db_path {
+            cmd.env("DB_PATH", db_path);
+        }
+        if let Some(cid) = chat_id {
+            cmd.env("TELEGRAM_CHAT_ID", cid);
+        }
+        cmd.env("PYTHONPATH", &run_dir)
             .current_dir(&run_dir)
             .stdin(std::process::Stdio::piped())
             .stdout(std::process::Stdio::piped())
@@ -366,10 +398,30 @@ impl SolverRunner {
         agy_bin: &str,
         prompt: &str,
         model: &str,
+        chat_id: Option<&str>,
     ) -> Result<String> {
+        let run_dir = if self.project_dir.exists() {
+            self.project_dir.clone()
+        } else {
+            self.working_dir.clone()
+        };
+
+        let mut env_vars = "LANG=en_US.UTF-8 LC_ALL=en_US.UTF-8".to_string();
+        if let Some(token) = &self.tg_bot_token {
+            env_vars.push_str(&format!(" TELEGRAM_BOT_TOKEN='{}'", token.replace('\'', "'\\''")));
+        }
+        if let Some(db) = &self.db_path {
+            env_vars.push_str(&format!(" DB_PATH='{}'", db.display()));
+        }
+        if let Some(cid) = chat_id {
+            env_vars.push_str(&format!(" TELEGRAM_CHAT_ID='{}'", cid.replace('\'', "'\\''")));
+        }
+        env_vars.push_str(&format!(" PYTHONPATH='{}'", run_dir.display()));
+
         let remote_cmd = format!(
-            "cd {} && LANG=en_US.UTF-8 LC_ALL=en_US.UTF-8 {} --dangerously-skip-permissions --model {}",
-            self.working_dir.display(),
+            "cd {} && {} {} --dangerously-skip-permissions --model {}",
+            run_dir.display(),
+            env_vars,
             agy_bin,
             model
         );

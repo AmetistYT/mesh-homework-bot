@@ -690,7 +690,7 @@ impl BotHandler {
         let chat_id_str = chat_id.to_string();
 
         tokio::spawn(async move {
-            match solver.ask_chat(&prompt, "gemini-3.8-flash-low").await {
+            match solver.ask_chat(&prompt, "gemini-3.8-flash-medium", Some(&chat_id_str)).await {
                 Ok(reply) => {
                     let clean = reply.replace("```telegram_action", "").trim().to_string();
                     let sent_id = tg.send_message_reply(&chat_id_str, &clean, Some(message_id)).await.ok();
@@ -1041,7 +1041,13 @@ impl BotHandler {
              8. Учитывай контекст предыдущего диалога: помни, о чем шла речь ранее в переписке, не начинай каждый раз с чистого листа.\n\
              9. Если спрашивают про дни недели или даты — сопоставь с текущей датой ({}) и расписанием МЭШ.\n\
              10. Используй список участников и их приписки: понимай, к кому обращаются по имени (Имран, Игорь, Асыл, Варя, Семён, Демир, Тимофей, Алина и др.).\n\
-             11. Если выполняется модерация владельцем (@ametist1337) — вердикт в 1 короткую фразу плюс блок ```telegram_action```.",
+             11. ПОЛНЫЙ ДОСТУП К ТЕРМИНАЛУ, БД И API БОТА:\n\
+                 - В твоем распоряжении терминал сервера, Python 3, bash и база данных SQLite.\n\
+                 - Для любых аналитических и сложных запросов (например: 'топ по сообщениям', 'кто больше всех пишет', 'статистика активности', 'сколько сообщений у @user', 'выгрузи активность', 'кто чаще всего спорит') ты МОЖЕШЬ И ДОЛЖЕН писать и исполнять скрипты на Python или bash!\n\
+                 - В репозитории уже доступен готовый инструмент и CLI: `python3 scripts/bot_api.py top 20` (выводит красивый рейтинг участников по сообщениям с именами и приписками), `python3 scripts/bot_api.py stats`, `python3 scripts/bot_api.py sql \"SELECT ...\"`.\n\
+                 - Переменные окружения: `$TELEGRAM_BOT_TOKEN` (токен бота для прямых вызовов Telegram API), `$TELEGRAM_CHAT_ID` (текущий чат), `$DB_PATH` (путь к базе `homeworks.db`).\n\
+                 - Если требуется написать скрипт на Python или Rust для обработки данных — пиши, запускай его через run_command, получай результат и возвращай лаконичный и точный ответ в чат!\n\
+             12. Если выполняется модерация владельцем (@ametist1337) — вердикт в 1 короткую фразу плюс блок ```telegram_action```.",
             roster_context,
             mod_instructions,
             chat_history_context,
@@ -1059,7 +1065,7 @@ impl BotHandler {
         let query_clone = query.to_string();
 
         tokio::spawn(async move {
-            match solver.ask_chat(&prompt, "gemini-3.8-flash-low").await {
+            match solver.ask_chat(&prompt, "gemini-3.8-flash-medium", Some(&chat_id_str)).await {
                 Ok(reply) => {
                     let (action_opt, clean_reply) = ModerationManager::extract_action(&reply);
 
