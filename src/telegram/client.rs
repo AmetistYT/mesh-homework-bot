@@ -68,6 +68,30 @@ impl TelegramMessage {
         }
         String::new()
     }
+
+    pub fn get_largest_photo_file_id(&self) -> Option<String> {
+        if let Some(ref p) = self.photo {
+            if let Some(arr) = p.as_array() {
+                let mut best_id = None;
+                let mut max_metric: i64 = -1;
+                for item in arr {
+                    if let Some(fid) = item.get("file_id").and_then(|v| v.as_str()) {
+                        let size = item.get("file_size").and_then(|v| v.as_i64())
+                            .or_else(|| item.get("width").and_then(|v| v.as_i64()))
+                            .unwrap_or(0);
+                        if size >= max_metric {
+                            max_metric = size;
+                            best_id = Some(fid.to_string());
+                        }
+                    }
+                }
+                if best_id.is_some() {
+                    return best_id;
+                }
+            }
+        }
+        None
+    }
 }
 
 #[allow(dead_code)]
@@ -398,6 +422,7 @@ impl TelegramClient {
         chat_id: &str,
         photo_path: P,
         caption: Option<&str>,
+        reply_to_message_id: Option<i64>,
     ) -> Result<i64> {
         let file_bytes = tokio::fs::read(&photo_path).await?;
         let filename = photo_path
@@ -407,9 +432,18 @@ impl TelegramClient {
             .to_string_lossy()
             .to_string();
 
+        let lower = filename.to_lowercase();
+        let mime = if lower.ends_with(".jpg") || lower.ends_with(".jpeg") {
+            "image/jpeg"
+        } else if lower.ends_with(".webp") {
+            "image/webp"
+        } else {
+            "image/png"
+        };
+
         let part = Part::bytes(file_bytes)
             .file_name(filename)
-            .mime_str("image/png")?;
+            .mime_str(mime)?;
 
         let mut form = Form::new()
             .text("chat_id", chat_id.to_string())
@@ -417,6 +451,9 @@ impl TelegramClient {
 
         if let Some(c) = caption {
             form = form.text("caption", c.to_string());
+        }
+        if let Some(r_id) = reply_to_message_id {
+            form = form.text("reply_to_message_id", r_id.to_string());
         }
 
         let resp = self
@@ -435,6 +472,45 @@ impl TelegramClient {
         }
 
         Ok(res.result.map(|m| m.message_id).unwrap_or(0))
+    }
+
+    pub async fn get_file_path(&self, file_id: &str) -> Result<String> {
+        let payload = serde_json::json!({
+            "file_id": file_id
+        });
+        let resp = self
+            .client
+            .post(self.api_url("getFile"))
+            .json(&payload)
+            .send()
+            .await?;
+
+        let res: TelegramApiResponse<serde_json::Value> = resp.json().await?;
+        if !res.ok {
+            return Err(anyhow!(
+                "Ошибка вызова getFile в Telegram: {:?}",
+                res.description
+            ));
+        }
+
+        let file_path = res
+            .result
+            .and_then(|r| r.get("file_path").and_then(|v| v.as_str().map(|s| s.to_string())))
+            .ok_or_else(|| anyhow!("В ответе getFile отсутствует file_path"))?;
+
+        Ok(file_path)
+    }
+
+    pub async fn download_file_to_path<P: AsRef<Path>>(&self, file_id: &str, target_path: P) -> Result<()> {
+        let file_path = self.get_file_path(file_id).await?;
+        let download_url = format!("https://api.telegram.org/file/bot{}/{}", self.bot_token, file_path);
+        let resp = self.client.get(&download_url).send().await?;
+        if !resp.status().is_success() {
+            return Err(anyhow!("Ошибка скачивания файла Telegram: HTTP {}", resp.status()));
+        }
+        let bytes = resp.bytes().await?;
+        tokio::fs::write(&target_path, bytes).await?;
+        Ok(())
     }
 
     pub async fn send_document<P: AsRef<Path>>(

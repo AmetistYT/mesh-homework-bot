@@ -225,6 +225,58 @@ def send_telegram_message(text: str, chat_id: str = None, reply_to_message_id: i
     with urllib.request.urlopen(req, timeout=10) as resp:
         return json.loads(resp.read().decode("utf-8"))
 
+def send_telegram_photo(photo_path: str, caption: str = None, chat_id: str = None, reply_to_message_id: int = None) -> dict:
+    """Отправляет фото напрямую в Telegram через Bot API multipart/form-data."""
+    token = get_bot_token()
+    if not token:
+        raise ValueError("TELEGRAM_BOT_TOKEN не найден в окружении или .env")
+    
+    target_chat = chat_id or get_default_chat_id()
+    url = f"https://api.telegram.org/bot{token}/sendPhoto"
+    
+    boundary = "----WebKitFormBoundary" + os.urandom(16).hex()
+    body = bytearray()
+    
+    # chat_id
+    body.extend(f"--{boundary}\r\n".encode("utf-8"))
+    body.extend(b'Content-Disposition: form-data; name="chat_id"\r\n\r\n')
+    body.extend(f"{target_chat}\r\n".encode("utf-8"))
+    
+    # caption
+    if caption:
+        body.extend(f"--{boundary}\r\n".encode("utf-8"))
+        body.extend(b'Content-Disposition: form-data; name="caption"\r\n\r\n')
+        body.extend(f"{caption}\r\n".encode("utf-8"))
+        
+    # reply_to_message_id
+    if reply_to_message_id:
+        body.extend(f"--{boundary}\r\n".encode("utf-8"))
+        body.extend(b'Content-Disposition: form-data; name="reply_to_message_id"\r\n\r\n')
+        body.extend(f"{reply_to_message_id}\r\n".encode("utf-8"))
+        
+    # photo file
+    p = Path(photo_path)
+    if not p.exists():
+        raise FileNotFoundError(f"Файл {photo_path} не найден")
+        
+    filename = p.name
+    content_type = "image/jpeg" if filename.lower().endswith((".jpg", ".jpeg")) else "image/png"
+    body.extend(f"--{boundary}\r\n".encode("utf-8"))
+    body.extend(f'Content-Disposition: form-data; name="photo"; filename="{filename}"\r\n'.encode("utf-8"))
+    body.extend(f"Content-Type: {content_type}\r\n\r\n".encode("utf-8"))
+    body.extend(p.read_bytes())
+    body.extend(b"\r\n")
+    
+    body.extend(f"--{boundary}--\r\n".encode("utf-8"))
+    
+    req = urllib.request.Request(
+        url,
+        data=bytes(body),
+        headers={"Content-Type": f"multipart/form-data; boundary={boundary}"}
+    )
+    with urllib.request.urlopen(req, timeout=30) as resp:
+        return json.loads(resp.read().decode("utf-8"))
+
 def telegram_api_call(method: str, params: dict = None) -> dict:
     """Выполняет произвольный запрос к Telegram Bot API."""
     token = get_bot_token()
@@ -263,6 +315,13 @@ def main():
     send_p.add_argument("--chat-id", type=str, default=None)
     send_p.add_argument("--reply-to", type=int, default=None)
 
+    # send_photo
+    photo_p = subparsers.add_parser("send_photo", help="Отправить фото в Telegram")
+    photo_p.add_argument("photo_path", type=str, help="Путь к файлу фото")
+    photo_p.add_argument("--caption", type=str, default=None)
+    photo_p.add_argument("--chat-id", type=str, default=None)
+    photo_p.add_argument("--reply-to", type=int, default=None)
+
     args = parser.parse_args()
 
     if args.command == "top":
@@ -288,6 +347,10 @@ def main():
 
     elif args.command == "send":
         resp = send_telegram_message(args.text, chat_id=args.chat_id, reply_to_message_id=args.reply_to)
+        print(json.dumps(resp, ensure_ascii=False, indent=2))
+
+    elif args.command == "send_photo":
+        resp = send_telegram_photo(args.photo_path, caption=args.caption, chat_id=args.chat_id, reply_to_message_id=args.reply_to)
         print(json.dumps(resp, ensure_ascii=False, indent=2))
 
     else:

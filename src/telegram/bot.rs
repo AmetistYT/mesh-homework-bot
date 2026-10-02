@@ -7,6 +7,7 @@ use crate::mesh::models::EventCalendarItem;
 use crate::mesh::MeshClient;
 use crate::telegram::client::TelegramClient;
 use crate::telegram::moderation::ModerationManager;
+use crate::solver::VisualRenderer;
 
 #[derive(Debug, Clone)]
 pub enum TargetDay {
@@ -156,13 +157,19 @@ impl BotHandler {
                                     || mentions_bot
                             );
 
+                            let photo_file_id = msg.get_largest_photo_file_id().or_else(|| {
+                                msg.reply_to_message.as_ref().and_then(|r| r.get_largest_photo_file_id())
+                            });
+                            let has_photo = photo_file_id.is_some();
+                            let is_private = msg.chat.chat_type == "private";
+
                             if is_direct_moderation_command(raw_text) {
                                 self.handle_direct_moderation(&chat_id, message_id, from_id, raw_text, is_ametist, is_admin, reply_user).await;
                             } else if raw_text.starts_with('/') {
                                 self.handle_command(&chat_id, message_id, raw_text, from_username, from_id, is_admin).await;
                             } else if is_dispute_natural {
                                 self.handle_dispute_summary(&chat_id, message_id).await;
-                            } else if raw_text.starts_with('!') || is_reply_to_bot || mentions_bot {
+                            } else if raw_text.starts_with('!') || is_reply_to_bot || mentions_bot || is_private || (has_photo && is_reply_to_bot) {
                                 let query_text = if raw_text.starts_with('!') {
                                     raw_text.to_string()
                                 } else if let Some(stripped) = raw_text.strip_prefix("@ew1484_bot") {
@@ -171,10 +178,14 @@ impl BotHandler {
                                     format!("!{}", stripped.trim())
                                 } else if let Some(stripped) = raw_text.strip_prefix("бот ") {
                                     format!("!{}", stripped.trim())
+                                } else if !raw_text.is_empty() {
+                                    format!("!{}", raw_text)
+                                } else if has_photo {
+                                    "!Что на прикрепленном изображении?".to_string()
                                 } else {
                                     format!("!{}", raw_text)
                                 };
-                                self.handle_chat_query(&chat_id, &query_text, message_id, is_ametist, is_admin, reply_user).await;
+                                self.handle_chat_query(&chat_id, &query_text, message_id, is_ametist, is_admin, reply_user, photo_file_id).await;
                             }
                         } else if let Some(emsg) = u.edited_message {
                             let display_content = emsg.display_text();
@@ -884,19 +895,51 @@ impl BotHandler {
         is_ametist: bool,
         is_admin: bool,
         reply_user: Option<(i64, Option<String>, Option<String>)>,
+        photo_file_id: Option<String>,
     ) {
-        let query = raw_text.trim_start_matches('!').trim();
+        let mut query = raw_text.trim_start_matches('!').trim().to_string();
         if query.is_empty() {
-            return;
+            if photo_file_id.is_some() {
+                query = "Что изображено на прикрепленном изображении? Разбери задачу или ответь по картинке.".to_string();
+            } else {
+                return;
+            }
         }
 
         info!("Получен запрос к AI чату (msg_id: {}): '{}'", message_id, query);
 
         // Проверяем, не является ли запрос просьбой разобрать спор в чате
-        if is_dispute_query(query) {
+        if is_dispute_query(&query) {
             self.handle_dispute_summary(chat_id, message_id).await;
             return;
         }
+
+        // Скачиваем прикрепленное фото из Telegram во временный файл, если есть
+        let mut downloaded_photo: Option<String> = None;
+        if let Some(ref fid) = photo_file_id {
+            let clean_chat_id = chat_id.replace('-', "m");
+            let temp_path = format!(
+                "/tmp/tg_photo_{}_{}_{}.jpg",
+                clean_chat_id,
+                message_id,
+                chrono::Utc::now().timestamp_millis()
+            );
+            match self.tg.download_file_to_path(fid, &temp_path).await {
+                Ok(_) => {
+                    info!("Успешно скачано прикрепленное фото в {}", temp_path);
+                    downloaded_photo = Some(temp_path);
+                }
+                Err(e) => {
+                    warn!("Не удалось скачать фото из Telegram (file_id: {}): {}", fid, e);
+                }
+            }
+        }
+
+        let user_query_formatted = if let Some(ref p) = downloaded_photo {
+            format!("*прикреплено: {}*\n{}", p, query)
+        } else {
+            query.clone()
+        };
 
         let today = chrono::Local::now().date_naive();
         let from_date = today - chrono::Duration::days(14);
@@ -1047,14 +1090,17 @@ impl BotHandler {
                  - В репозитории уже доступен готовый инструмент и CLI: `python3 scripts/bot_api.py top 20` (выводит красивый рейтинг участников по сообщениям с именами и приписками), `python3 scripts/bot_api.py stats`, `python3 scripts/bot_api.py sql \"SELECT ...\"`.\n\
                  - Переменные окружения: `$TELEGRAM_BOT_TOKEN` (токен бота для прямых вызовов Telegram API), `$TELEGRAM_CHAT_ID` (текущий чат), `$DB_PATH` (путь к базе `homeworks.db`).\n\
                  - Если требуется написать скрипт на Python или Rust для обработки данных — пиши, запускай его через run_command, получай результат и возвращай лаконичный и точный ответ в чат!\n\
-             12. Если выполняется модерация владельцем (@ametist1337) — вердикт в 1 короткую фразу плюс блок ```telegram_action```.",
+             12. РАБОТА С ИЗОБРАЖЕНИЯМИ:\n\
+                 - Если в вопросе пользователя есть строка `*прикреплено: /путь/к/файлу.jpg*`, значит к запросу прикреплена картинка. Файл доступен на диске сервера: ты можешь проанализировать его, использовать скрипты на Python (например, PIL/tesseract) или консольные утилиты.\n\
+                 - Если ты хочешь отправить в чат сгенерированное изображение/график/чертеж: сохрани картинку в файл (например, в `/tmp/plot.png`) и укажи в своем ответе: `*прикреплено: /tmp/plot.png*` (бот автоматически отправит фото в чат и удалит временный файл), либо отправь напрямую вызовом `python3 scripts/bot_api.py send_photo /tmp/plot.png`.\n\
+             13. Если выполняется модерация владельцем (@ametist1337) — вердикт в 1 короткую фразу плюс блок ```telegram_action```.",
             roster_context,
             mod_instructions,
             chat_history_context,
             schedule_context,
             mesh_context,
             solutions_context,
-            query,
+            user_query_formatted,
             today.format("%d.%m.%Y (%A)")
         );
 
@@ -1063,11 +1109,32 @@ impl BotHandler {
         let db_cl = self.db.clone();
         let chat_id_str = chat_id.to_string();
         let query_clone = query.to_string();
+        let temp_photo_cleanup = downloaded_photo.clone();
 
         tokio::spawn(async move {
-            match solver.ask_chat(&prompt, "gemini-3.8-flash-medium", Some(&chat_id_str)).await {
+            let res = solver.ask_chat(&prompt, "gemini-3.8-flash-medium", Some(&chat_id_str)).await;
+
+            // Удаляем временный файл входящего фото после ответа модели
+            if let Some(ref p) = temp_photo_cleanup {
+                let _ = tokio::fs::remove_file(p).await;
+            }
+
+            match res {
                 Ok(reply) => {
-                    let (action_opt, clean_reply) = ModerationManager::extract_action(&reply);
+                    let (action_opt, raw_clean_reply) = ModerationManager::extract_action(&reply);
+                    let (clean_reply, outgoing_photo_opt) = {
+                        let (cleaned, direct_photo) = extract_attached_photo(&raw_clean_reply);
+                        if direct_photo.is_some() {
+                            (cleaned, direct_photo)
+                        } else {
+                            let (visual_clean, visual_img) = VisualRenderer::process_visuals_and_strip(&cleaned, None);
+                            if let Some(v_path) = visual_img {
+                                (visual_clean, Some(v_path.to_string_lossy().to_string()))
+                            } else {
+                                (cleaned, None)
+                            }
+                        }
+                    };
 
                     if let Some(action) = action_opt {
                         match ModerationManager::execute_action(
@@ -1107,24 +1174,60 @@ impl BotHandler {
                         }
                     } else {
                         let final_msg = if clean_reply.trim().is_empty() {
-                            "Команда обработана, но ответ пустой.".to_string()
+                            if outgoing_photo_opt.is_some() {
+                                String::new()
+                            } else {
+                                "Команда обработана, но ответ пустой.".to_string()
+                            }
                         } else {
                             clean_reply
                         };
-                        let sent_id = tg_client.send_message_reply(&chat_id_str, &final_msg, Some(message_id)).await.ok();
-                        if let Some(sid) = sent_id {
-                            let _ = db_cl.save_chat_message(
-                                &chat_id_str,
-                                sid,
-                                0,
-                                Some("ew1484_bot"),
-                                "МЭШ Бот Помощник",
-                                &final_msg,
-                                Some(message_id),
-                                reply_user.as_ref().map(|u| u.0),
-                                Some(&query_clone),
-                                chrono::Utc::now().timestamp(),
-                            );
+
+                        let mut sent_via_photo = false;
+                        if let Some(ref photo_path) = outgoing_photo_opt {
+                            if std::path::Path::new(photo_path).exists() {
+                                let cap = if final_msg.is_empty() { None } else { Some(final_msg.as_str()) };
+                                match tg_client.send_photo(&chat_id_str, photo_path, cap, Some(message_id)).await {
+                                    Ok(pid) => {
+                                        sent_via_photo = true;
+                                        let _ = tokio::fs::remove_file(photo_path).await;
+                                        let _ = db_cl.save_chat_message(
+                                            &chat_id_str,
+                                            pid,
+                                            0,
+                                            Some("ew1484_bot"),
+                                            "МЭШ Бот Помощник",
+                                            if final_msg.is_empty() { "[Фото]" } else { &final_msg },
+                                            Some(message_id),
+                                            reply_user.as_ref().map(|u| u.0),
+                                            Some(&query_clone),
+                                            chrono::Utc::now().timestamp(),
+                                        );
+                                    }
+                                    Err(e) => {
+                                        warn!("Не удалось отправить прикрепленное фото в ответ: {}", e);
+                                        let _ = tokio::fs::remove_file(photo_path).await;
+                                    }
+                                }
+                            }
+                        }
+
+                        if !sent_via_photo {
+                            let sent_id = tg_client.send_message_reply(&chat_id_str, &final_msg, Some(message_id)).await.ok();
+                            if let Some(sid) = sent_id {
+                                let _ = db_cl.save_chat_message(
+                                    &chat_id_str,
+                                    sid,
+                                    0,
+                                    Some("ew1484_bot"),
+                                    "МЭШ Бот Помощник",
+                                    &final_msg,
+                                    Some(message_id),
+                                    reply_user.as_ref().map(|u| u.0),
+                                    Some(&query_clone),
+                                    chrono::Utc::now().timestamp(),
+                                );
+                            }
                         }
                     }
                 }
@@ -1141,6 +1244,36 @@ impl BotHandler {
             }
         });
     }
+}
+
+pub fn extract_attached_photo(text: &str) -> (String, Option<String>) {
+    let prefix = "*прикреплено:";
+    let suffix = "*";
+    if let Some(start_idx) = text.find(prefix) {
+        let after = &text[start_idx + prefix.len()..];
+        if let Some(end_idx) = after.find(suffix) {
+            let path = after[..end_idx].trim().to_string();
+            let mut cleaned = text.to_string();
+            let full_len = prefix.len() + end_idx + suffix.len();
+            cleaned.replace_range(start_idx..start_idx + full_len, "");
+            return (cleaned.trim().to_string(), Some(path));
+        }
+    }
+
+    let prefix_plain = "прикреплено:";
+    if let Some(start_idx) = text.to_lowercase().find(prefix_plain) {
+        let after = &text[start_idx + prefix_plain.len()..];
+        let end_idx = after.find('\n').unwrap_or(after.len());
+        let path = after[..end_idx].trim().trim_matches('*').trim().to_string();
+        if path.starts_with('/') && (std::path::Path::new(&path).exists() || path.ends_with(".png") || path.ends_with(".jpg")) {
+            let mut cleaned = text.to_string();
+            let full_len = prefix_plain.len() + end_idx;
+            cleaned.replace_range(start_idx..start_idx + full_len, "");
+            return (cleaned.trim().to_string(), Some(path));
+        }
+    }
+
+    (text.to_string(), None)
 }
 
 pub fn is_direct_moderation_command(text: &str) -> bool {
@@ -1565,6 +1698,21 @@ mod tests {
 
         msg.text = Some("Обычный текст".to_string());
         assert_eq!(msg.display_text(), "Обычный текст");
+    }
+
+    #[test]
+    fn test_extract_attached_photo() {
+        let (text, photo) = extract_attached_photo("Вот график функции:\n*прикреплено: /tmp/plot_1.png*");
+        assert_eq!(photo, Some("/tmp/plot_1.png".to_string()));
+        assert_eq!(text, "Вот график функции:");
+
+        let (text2, photo2) = extract_attached_photo("*прикреплено: /tmp/img.jpg*\nРешение задания готово.");
+        assert_eq!(photo2, Some("/tmp/img.jpg".to_string()));
+        assert_eq!(text2, "Решение задания готово.");
+
+        let (text3, photo3) = extract_attached_photo("Обычный ответ без картинки");
+        assert_eq!(photo3, None);
+        assert_eq!(text3, "Обычный ответ без картинки");
     }
 }
 
