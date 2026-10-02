@@ -249,8 +249,12 @@ impl ModerationManager {
                         let ln_low = ln.to_lowercase();
                         ln_low == t_lower || ln_low.contains(&t_lower)
                     });
+                    let matches_title = a.custom_title.as_deref().map_or(false, |ct| {
+                        let ct_low = ct.trim().to_lowercase();
+                        !ct_low.is_empty() && (ct_low == t_lower || ct_low.contains(&t_lower) || t_lower.contains(&ct_low))
+                    });
 
-                    if matches_un || matches_fn || matches_ln {
+                    if matches_un || matches_fn || matches_ln || matches_title {
                         if a.user.id == bot_id {
                             return Err(anyhow!("Невозможно применить действие модерации к самому боту."));
                         }
@@ -259,6 +263,7 @@ impl ModerationManager {
                             a.user.username.as_deref(),
                             &a.user.first_name,
                             a.user.last_name.as_deref(),
+                            a.custom_title.as_deref(),
                         );
                         let u_display = a.user.username.map(|u| format!("@{}", u.trim_start_matches('@')));
                         return Ok((a.user.id, u_display));
@@ -1087,7 +1092,7 @@ mod tests {
         assert_eq!(res2.unwrap(), (8026023851, None));
 
         // 3. Команда с target="Имран", но в reply_user другое имя, зато в БД есть Имран
-        let _ = db.save_seen_user(999999, Some("imran777"), "Имран", None);
+        let _ = db.save_seen_user(999999, Some("imran777"), "Имран", None, Some("имран"));
         let res3 = ModerationManager::resolve_target_user(&tg, &db, "-100", Some("Имран"), None).await;
         assert_eq!(res3.unwrap(), (999999, Some("@imran777".to_string())));
     }

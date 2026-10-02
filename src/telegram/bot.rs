@@ -23,6 +23,7 @@ pub enum BotCommandEvent {
     ForceCheck,
 }
 
+#[derive(Clone)]
 pub struct BotHandler {
     tg: TelegramClient,
     mesh: MeshClient,
@@ -83,12 +84,12 @@ impl BotHandler {
                             };
 
                             if let Some(f) = from {
-                                let _ = self.db.save_seen_user(f.id, f.username.as_deref(), &f.first_name, f.last_name.as_deref());
+                                let _ = self.db.save_seen_user(f.id, f.username.as_deref(), &f.first_name, f.last_name.as_deref(), None);
                             }
 
                             let reply_user = msg.reply_to_message.as_ref().and_then(|r| {
                                 r.from.as_ref().map(|u| {
-                                    let _ = self.db.save_seen_user(u.id, u.username.as_deref(), &u.first_name, u.last_name.as_deref());
+                                    let _ = self.db.save_seen_user(u.id, u.username.as_deref(), &u.first_name, u.last_name.as_deref(), None);
                                     (u.id, u.username.clone().map(|un| format!("@{}", un)), Some(u.first_name.clone()))
                                 })
                             });
@@ -644,9 +645,11 @@ impl BotHandler {
             return;
         }
 
+        let title_map = self.db.get_user_titles_map().unwrap_or_default();
         let mut formatted_history = String::new();
         for msg in &history {
             let un_str = msg.username.as_deref().map(|u| format!(" (@{})", u)).unwrap_or_default();
+            let title_info = title_map.get(&msg.user_id).map(|t| format!(" [приписка: {}]", t)).unwrap_or_default();
             let reply_info = if let Some(r_id) = msg.reply_to_message_id {
                 let r_user = msg.reply_to_user_id.map(|id| format!(" user:{}", id)).unwrap_or_default();
                 format!(" [в ответ на #{}{}]", r_id, r_user)
@@ -654,8 +657,8 @@ impl BotHandler {
                 String::new()
             };
             formatted_history.push_str(&format!(
-                "ID #{}: {}{}{}: {}\n",
-                msg.message_id, msg.full_name, un_str, reply_info, msg.text
+                "ID #{}: {}{}{}{}: {}\n",
+                msg.message_id, msg.full_name, title_info, un_str, reply_info, msg.text
             ));
         }
 
@@ -791,6 +794,87 @@ impl BotHandler {
         }
     }
 
+    /// Синхронизация администраторов и титулов (приписок) чата с сохранением в базу данных
+    pub async fn sync_chat_administrators_and_titles(&self, chat_id: &str) {
+        if let Ok(admins) = self.tg.get_chat_administrators(chat_id).await {
+            info!("Синхронизация участников и титулов чата {}: получено {} администраторов", chat_id, admins.len());
+            for a in admins {
+                let title = a.custom_title.as_deref().map(|t| t.trim()).filter(|t| !t.is_empty());
+                let _ = self.db.save_seen_user(
+                    a.user.id,
+                    a.user.username.as_deref(),
+                    &a.user.first_name,
+                    a.user.last_name.as_deref(),
+                    title,
+                );
+            }
+        }
+    }
+
+    /// Построение блока привязки участников группы (ID, приписки / кастомные титулы, юзернеймы, имена) для промпта
+    pub async fn build_group_roster_context(&self, chat_id: &str) -> (String, std::collections::HashMap<i64, String>) {
+        // 1. Синхронизируем через Telegram API
+        self.sync_chat_administrators_and_titles(chat_id).await;
+
+        // 2. Получаем карту титулов из базы
+        let mut titles_map = self.db.get_user_titles_map().unwrap_or_default();
+
+        // 3. Эталонный реестр участников группы класса
+        let known_roster = [
+            (8193800816i64, Some("Ametist1337"), "Ametist1337", "семён", "administrator (Владелец / доверенный администратор)"),
+            (8026023851i64, None, "Оп оп сприподнизовское движение", "имран", "administrator"),
+            (8603102299i64, Some("asas19902"), "игорь", "игорь", "administrator"),
+            (8478374870i64, Some("oracle_edits"), "zenty | bskt | #online #sf🪬", "демир", "administrator"),
+            (7575524932i64, Some("Grigosha200"), "Grigosha 14/12", "тммофей", "administrator (Тимофей)"),
+            (7466301796i64, Some("Trlcly"), "Tricly", "андрей", "administrator"),
+            (7679243922i64, Some("sdayzx"), "wᴀlly🎰", "айдина", "administrator"),
+            (7838916464i64, None, ".", "ассоль", "administrator"),
+            (8050447344i64, Some("snova_obognal"), "agg✌🏿", "агния", "administrator"),
+            (7076530728i64, None, "Alen", "ален", "administrator"),
+            (6274940965i64, None, "PEGA", "арсений", "administrator"),
+            (7339405598i64, Some("DeShek67"), "Варя", "варя", "administrator"),
+            (8732018819i64, Some("bWRmfTID"), "💋", "лиза", "administrator"),
+            (1665877840i64, None, "васька", "василя", "administrator"),
+            (5393284763i64, Some("gussiavaffe"), "V", "варя", "administrator"),
+            (5278759499i64, Some("maksimpolyakov1234"), "Максим", "максим", "administrator"),
+            (8469803740i64, Some("AHzkto67"), "Eudh", "асыл", "administrator"),
+            (6731822991i64, Some("yeo3ange"), "🅴 чęлķāçтâя", "алина", "administrator"),
+            (8566127992i64, Some("zxcdota2kitty"), "жыртракс мод", "лох ебать", "creator (Создатель группы)"),
+            (8127794104i64, Some("EW1484_bot"), "автогдзешка", "", "bot (Ты сам)"),
+        ];
+
+        for (uid, un_opt, fn_, title, _role) in &known_roster {
+            if !title.is_empty() {
+                titles_map.entry(*uid).or_insert_with(|| title.to_string());
+                let _ = self.db.save_seen_user(*uid, *un_opt, fn_, None, Some(title));
+            }
+        }
+
+        let mut roster_text = String::from("СПИСОК И ПРИВЯЗКА УЧАСТНИКОВ ГРУППЫ (ID, ПРИПИСКИ / ТИТУЛЫ, ЮЗЕРНЕЙМЫ И ИМЕНА):\n\
+        Каждый участник группы имеет уникальный Telegram ID, отображаемое имя (ник), юзернейм и кастомный титул (официальную приписку администратора в чате).\n\
+        Приписка/титул — это настоящее имя или статус человека в коллективе. Когда в чате называют человека по имени (например, Имран, Игорь, Демир, Тимофей, Семён, Асыл, Варя, Алина, Арсений, Лиза, Василя, Ассоль, Агния, Ален, Андрей, Айдина, Максим), используй эту таблицу:\n");
+
+        for (uid, un_opt, fn_, title, role) in &known_roster {
+            let un_str = un_opt.map(|u| format!("@{}", u)).unwrap_or_else(|| "нет".to_string());
+            let title_str = if title.is_empty() { "нет".to_string() } else { format!("\"{}\"", title) };
+            roster_text.push_str(&format!("• ID: {} | Приписка (титул): {} | Имя: {} | Username: {} | Роль: {}\n", uid, title_str, fn_, un_str, role));
+        }
+
+        // Если в базе есть другие пользователи с титулами, добавляем их
+        if let Ok(known_users) = self.db.get_all_known_users_in_chat(chat_id) {
+            for (uid, un_opt, full_name) in known_users {
+                if !known_roster.iter().any(|r| r.0 == uid) {
+                    let title = titles_map.get(&uid).map(|t| format!("\"{}\"", t)).unwrap_or_else(|| "нет".to_string());
+                    let un_str = un_opt.map(|u| format!("@{}", u)).unwrap_or_else(|| "нет".to_string());
+                    roster_text.push_str(&format!("• ID: {} | Приписка (титул): {} | Имя: {} | Username: {}\n", uid, title, full_name, un_str));
+                }
+            }
+        }
+
+        roster_text.push('\n');
+        (roster_text, titles_map)
+    }
+
     async fn handle_chat_query(
         &self,
         chat_id: &str,
@@ -862,6 +946,9 @@ impl BotHandler {
             }
         }
 
+        // Загружаем привязку участников группы и карту титулов
+        let (roster_context, title_map) = self.build_group_roster_context(chat_id).await;
+
         // Загружаем недавний контекст истории диалога (до 200k токенов ~ 700k символов)
         let chat_history = self.db.get_chat_history(chat_id, 1500, 700_000).unwrap_or_default();
         let mut chat_history_context = String::new();
@@ -872,12 +959,13 @@ impl BotHandler {
                     continue;
                 }
                 let un = m.username.as_deref().map(|u| format!(" (@{})", u)).unwrap_or_default();
+                let title_hint = title_map.get(&m.user_id).map(|t| format!(" [приписка: {}]", t)).unwrap_or_default();
                 let r_hint = if let Some(r_id) = m.reply_to_message_id {
                     format!(" [в ответ на #{}]", r_id)
                 } else {
                     String::new()
                 };
-                chat_history_context.push_str(&format!("[#{}] {}{}{}: {}\n", m.message_id, m.full_name, un, r_hint, m.text));
+                chat_history_context.push_str(&format!("[#{}] {}{}{}{} (id: {}): {}\n", m.message_id, m.full_name, title_hint, un, r_hint, m.user_id, m.text));
             }
             chat_history_context.push('\n');
         }
@@ -934,6 +1022,7 @@ impl BotHandler {
             "Ты — умный школьный помощник и репетитор для учеников 7 класса, а также умный модератор чата.\n\
              Тебе задали вопрос или команду в Telegram-чате класса.\n\n\
              {}\
+             {}\
              {}\n\
              {}\n\
              {}\n\
@@ -948,7 +1037,9 @@ impl BotHandler {
              5. Форматируй ответ в стиле Telegram Markdown/HTML: используй *жирный шрифт*, `моноширинный текст`, списки.\n\
              6. ЗАПРЕЩЕНО использовать LaTeX ($$, $, \\frac, \\circ). Пиши обычным текстом, градусы знаком ° или °C.\n\
              7. Не используй смайлики и эмодзи.\n\
-             8. Отвечай кратко, емко, без лишней воды и длинных вступлений.",
+             8. Отвечай кратко, емко, без лишней воды и длинных вступлений.\n\
+             9. Используй список участников и их приписки: понимай, к кому обращаются по имени (например, если пишут 'Имран', 'Игорь', 'Асыл', 'Варя', 'Семён', 'Демир', 'Тимофей' и др., ты точно знаешь их Telegram ID, сообщения в истории и профиль).",
+            roster_context,
             mod_instructions,
             chat_history_context,
             schedule_context,

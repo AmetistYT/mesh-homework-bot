@@ -150,6 +150,7 @@ impl Database {
         let _ = conn.execute("ALTER TABLE processed_homeworks ADD COLUMN is_pinned INTEGER DEFAULT 0", []);
         let _ = conn.execute("ALTER TABLE processed_homeworks ADD COLUMN pinned_at TEXT", []);
         let _ = conn.execute("ALTER TABLE processed_homeworks ADD COLUMN unpinned_at TEXT", []);
+        let _ = conn.execute("ALTER TABLE seen_users ADD COLUMN custom_title TEXT", []);
 
         Ok(Self {
             conn: Arc::new(Mutex::new(conn)),
@@ -364,20 +365,23 @@ impl Database {
         username: Option<&str>,
         first_name: &str,
         last_name: Option<&str>,
+        custom_title: Option<&str>,
     ) -> Result<()> {
         let conn = self.conn.lock().unwrap();
         let now = Local::now().to_rfc3339();
         let clean_username = username.map(|u| u.trim_start_matches('@').to_lowercase());
+        let clean_title = custom_title.map(|t| t.trim().to_lowercase()).filter(|t| !t.is_empty());
 
         conn.execute(
-            "INSERT INTO seen_users (user_id, username, first_name, last_name, last_seen)
-             VALUES (?1, ?2, ?3, ?4, ?5)
+            "INSERT INTO seen_users (user_id, username, first_name, last_name, custom_title, last_seen)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6)
              ON CONFLICT(user_id) DO UPDATE SET
-                username = excluded.username,
+                username = COALESCE(excluded.username, seen_users.username),
                 first_name = excluded.first_name,
-                last_name = excluded.last_name,
+                last_name = COALESCE(excluded.last_name, seen_users.last_name),
+                custom_title = COALESCE(excluded.custom_title, seen_users.custom_title),
                 last_seen = excluded.last_seen",
-            params![user_id, clean_username, first_name, last_name, now],
+            params![user_id, clean_username, first_name, last_name, clean_title, now],
         )?;
         Ok(())
     }
@@ -401,33 +405,37 @@ impl Database {
             return Ok(None);
         }
 
-        let mut stmt = conn.prepare("SELECT user_id, username, first_name, last_name FROM seen_users")?;
+        let mut stmt = conn.prepare("SELECT user_id, username, first_name, last_name, custom_title FROM seen_users")?;
         let rows = stmt.query_map([], |row| {
             let uid: i64 = row.get(0)?;
             let un: Option<String> = row.get(1)?;
             let fn_: Option<String> = row.get(2)?;
             let ln: Option<String> = row.get(3)?;
-            Ok((uid, un, fn_, ln))
+            let ct: Option<String> = row.get(4).ok().flatten();
+            Ok((uid, un, fn_, ln, ct))
         })?;
 
         let mut exact_match = None;
         let mut partial_match = None;
 
         for r in rows.flatten() {
-            let (uid, un, fn_, ln) = r;
+            let (uid, un, fn_, ln, ct) = r;
             let un_low = un.as_deref().unwrap_or("").to_lowercase();
             let fn_low = fn_.as_deref().unwrap_or("").to_lowercase();
             let ln_low = ln.as_deref().unwrap_or("").to_lowercase();
+            let ct_low = ct.as_deref().unwrap_or("").to_lowercase();
 
             if (!un_low.is_empty() && un_low == clean)
                 || (!fn_low.is_empty() && fn_low == clean)
                 || (!ln_low.is_empty() && ln_low == clean)
+                || (!ct_low.is_empty() && ct_low == clean)
             {
                 exact_match = Some((uid, un));
                 break;
             }
 
-            if (!fn_low.is_empty() && (fn_low.contains(&clean) || clean.contains(&fn_low)))
+            if (!ct_low.is_empty() && (ct_low.contains(&clean) || clean.contains(&ct_low)))
+                || (!fn_low.is_empty() && (fn_low.contains(&clean) || clean.contains(&fn_low)))
                 || (!ln_low.is_empty() && (ln_low.contains(&clean) || clean.contains(&ln_low)))
                 || (!un_low.is_empty() && un_low.contains(&clean))
             {
@@ -438,6 +446,20 @@ impl Database {
         }
 
         Ok(exact_match.or(partial_match))
+    }
+
+    pub fn get_user_titles_map(&self) -> Result<std::collections::HashMap<i64, String>> {
+        let conn = self.conn.lock().unwrap();
+        let mut map = std::collections::HashMap::new();
+        let mut stmt = conn.prepare(
+            "SELECT user_id, custom_title FROM seen_users WHERE custom_title IS NOT NULL AND trim(custom_title) != ''"
+        )?;
+        let rows = stmt.query_map([], |row| Ok((row.get(0)?, row.get(1)?)))?;
+        for r in rows.flatten() {
+            let (uid, title): (i64, String) = r;
+            map.insert(uid, title);
+        }
+        Ok(map)
     }
 
     pub fn get_all_known_users_in_chat(&self, chat_id: &str) -> Result<Vec<(i64, Option<String>, String)>> {
