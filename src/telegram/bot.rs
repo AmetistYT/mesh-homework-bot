@@ -1185,19 +1185,7 @@ impl BotHandler {
             today.format("%d.%m.%Y (%A)")
         );
 
-        let requires_tools = {
-            let q_lower = query.to_lowercase();
-            q_lower.contains("топ") || q_lower.contains("статистик") || q_lower.contains("скрипт")
-            || q_lower.contains("график") || q_lower.contains("облако") || q_lower.contains("sql")
-            || q_lower.contains("посчитай") || q_lower.contains("выгрузи") || q_lower.contains("пропарси")
-            || q_lower.contains("баз") || q_lower.contains("мат")
-        };
-
-        let target_model = if requires_tools {
-            "gemini-3.8-flash-medium"
-        } else {
-            "gemini-3.8-flash-low"
-        };
+        let target_model = "gemini-3.8-flash-medium";
 
         let tg_client = self.tg.clone();
         let solver = self.solver.clone();
