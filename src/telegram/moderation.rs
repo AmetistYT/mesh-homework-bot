@@ -468,17 +468,6 @@ impl ModerationManager {
                     None
                 };
 
-                let _ = db.save_permission_backup(
-                    chat_id,
-                    user_id,
-                    username_opt.as_deref(),
-                    &member_info.status,
-                    member_info.custom_title.as_deref(),
-                    admin_rights_json.as_deref(),
-                    permissions_json.as_deref(),
-                    restore_at,
-                )?;
-
                 // 2. Если участник был администратором, сначала снимаем права админа (иначе Telegram не даст ограничить)
                 if is_admin {
                     let strip_rights = ChatAdminRights {
@@ -518,6 +507,18 @@ impl ModerationManager {
 
                 tg.restrict_chat_member(chat_id, user_id, perms_to_apply, until).await
                     .context("Ошибка вызова restrictChatMember в Telegram")?;
+
+                // 4. Только ПОСЛЕ успешного применения ограничений сохраняем бэкап прав в БД
+                let _ = db.save_permission_backup(
+                    chat_id,
+                    user_id,
+                    username_opt.as_deref(),
+                    &member_info.status,
+                    member_info.custom_title.as_deref(),
+                    admin_rights_json.as_deref(),
+                    permissions_json.as_deref(),
+                    restore_at,
+                )?;
 
                 // 4. Если задано авто-восстановление, запускаем таймер
                 if let Some(sec) = action.duration_seconds.filter(|&s| s > 0 && action.restore_previous_after) {

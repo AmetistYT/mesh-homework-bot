@@ -144,8 +144,8 @@ impl Engine {
         self.unpin_expired_messages().await;
 
         if self.mesh.is_token_expired().await {
-            warn!("МЭШ токен истек. Пробуем обновить через СУДИР...");
-            let _ = self.mesh.try_refresh_sudir().await;
+            warn!("МЭШ токен истек. Пробуем обновить через МЭШ SSO...");
+            let _ = self.mesh.try_refresh().await;
         }
 
         let today = Local::now().date_naive();

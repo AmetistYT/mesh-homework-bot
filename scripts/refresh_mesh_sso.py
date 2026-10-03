@@ -75,9 +75,9 @@ def run_sso_refresh():
     row_json = c.fetchone()
     cookies_json_str = row_json[0] if row_json else None
 
-    c.execute("SELECT value FROM settings WHERE key='mesh_cookies'")
-    row_legacy = c.fetchone()
-    cookies_legacy_str = row_legacy[0] if row_legacy else None
+    c.execute("SELECT value FROM settings WHERE key='mesh_refresh_token'")
+    row_rt = c.fetchone()
+    stored_refresh_token = row_rt[0] if row_rt else None
     conn.close()
 
     s = requests.Session()
@@ -104,14 +104,15 @@ def run_sso_refresh():
                 s.cookies.set(k, v, domain="school.mos.ru")
         cookies_loaded = True
 
-    if not cookies_loaded:
-        return {"status": "error", "message": "No cookies found in database settings"}
+    if not cookies_loaded and not stored_refresh_token:
+        return {"status": "error", "message": "No cookies or refresh token found in database settings"}
 
     try:
+        import re
         r1 = s.get("https://school.mos.ru/v3/auth/sudir/login", allow_redirects=True, timeout=15)
-        idx = r1.text.find("url=")
-        if idx != -1:
-            next_url = r1.text[idx + 4:].split('"')[0].replace("&amp;", "&")
+        m = re.search(r'url=([^"\' >]+)', r1.text, re.IGNORECASE)
+        if m:
+            next_url = m.group(1).replace("&amp;", "&")
             if not next_url.startswith("http"):
                 next_url = "https://login.mos.ru" + next_url
             r2 = s.get(next_url, allow_redirects=True, timeout=15)
@@ -125,8 +126,27 @@ def run_sso_refresh():
             elif ck.name in ("aupd_refresh_token", "refresh_token"):
                 new_refresh = ck.value
 
+        # Резерв: если SSO через куки не выдал JWT, пробуем /v3/token/refresh
+        if not new_token and (new_refresh or stored_refresh_token):
+            cand_rt = new_refresh or stored_refresh_token
+            try:
+                ref_resp = requests.post(
+                    "https://school.mos.ru/v3/token/refresh",
+                    data={"refresh_token": cand_rt.strip()},
+                    headers={"Content-Type": "application/x-www-form-urlencoded", "User-Agent": "okhttp/4.12.0"},
+                    timeout=10
+                )
+                if ref_resp.status_code in (200, 201):
+                    ref_data = ref_resp.json()
+                    tok_cand = ref_data.get("access_token")
+                    if tok_cand and is_jwt_valid(tok_cand):
+                        new_token = tok_cand
+                        new_refresh = ref_data.get("refresh_token") or cand_rt
+            except Exception:
+                pass
+
         if not new_token:
-            return {"status": "error", "message": "SSO exchange did not produce a valid JWT token"}
+            return {"status": "error", "message": "SSO exchange and v3 refresh did not produce a valid JWT token"}
 
         all_cookies = []
         flat_parts = []

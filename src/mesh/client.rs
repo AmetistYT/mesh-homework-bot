@@ -144,7 +144,27 @@ impl MeshClient {
 
     pub async fn is_token_expired(&self) -> bool {
         let token = self.jwt_token.read().await;
-        Self::check_jwt_expired(&token)
+        if !Self::check_jwt_expired(&token) {
+            return false;
+        }
+        drop(token);
+
+        // Если токен в памяти истек, проверяем, нет ли свежего токена в БД
+        if let Some(ref db) = self.db {
+            if let Ok(Some(db_token)) = db.get_setting("mesh_token") {
+                if !Self::check_jwt_expired(&db_token) {
+                    info!("Обнаружен валидный токен в БД, обновляем кэш клиента...");
+                    self.set_token(db_token).await;
+                    if let Ok(Some(db_rt)) = db.get_setting("mesh_refresh_token") {
+                        if !db_rt.is_empty() {
+                            self.set_refresh_token(db_rt).await;
+                        }
+                    }
+                    return false;
+                }
+            }
+        }
+        true
     }
 
     pub fn check_jwt_expired(token: &str) -> bool {
@@ -531,6 +551,23 @@ impl MeshClient {
 
     /// Единый метод обновления токена МЭШ со всеми резервными цепочками
     pub async fn try_refresh(&self) -> Result<Option<String>> {
+        // 0. Приоритет: проверяем, нет ли уже свежего действующего токена в БД
+        if let Some(ref db) = self.db {
+            if let Ok(Some(db_token)) = db.get_setting("mesh_token") {
+                let current_token = self.get_token().await;
+                if !Self::check_jwt_expired(&db_token) && db_token != current_token {
+                    info!("Свежий МЭШ токен получен напрямую из БД!");
+                    self.set_token(db_token.clone()).await;
+                    if let Ok(Some(db_rt)) = db.get_setting("mesh_refresh_token") {
+                        if !db_rt.is_empty() {
+                            self.set_refresh_token(db_rt).await;
+                        }
+                    }
+                    return Ok(Some(db_token));
+                }
+            }
+        }
+
         // 1. Приоритет: SSO автообновление через сессионные куки СУДИР/mos.ru
         if let Ok(Some(tok)) = self.refresh_from_sso().await {
             return Ok(Some(tok));

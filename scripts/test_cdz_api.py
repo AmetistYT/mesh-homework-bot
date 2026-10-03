@@ -48,9 +48,30 @@ for hw in hw_data:
         cdz_entries.append(hw)
         print(f"HW #{hw_id} | {subj} | {desc[:40]} | Attachments: {attachments}")
 
-# Also check additional_materials endpoint
-add_url = "https://school.mos.ru/api/family/materials/v1/additional_materials"
-add_resp = requests.post(add_url, headers=headers, json={"student_id": int(student_id), "from": "2026-09-28", "to": "2026-10-10"})
-print("Additional materials status:", add_resp.status_code)
-if add_resp.status_code == 200:
-    print("Additional materials sample:", json.dumps(add_resp.json(), ensure_ascii=False, indent=2)[:1000])
+# Also check eventcalendar endpoint with materials expansion
+import base64
+try:
+    payload = json.loads(base64.urlsafe_b64decode(token.split(".")[1] + "==").decode())
+    person_id = payload.get("msh")
+except Exception:
+    person_id = None
+
+if person_id:
+    events_url = "https://school.mos.ru/api/eventcalendar/v1/api/events"
+    ev_headers = dict(headers)
+    ev_headers["x-mes-role"] = "student"
+    ev_params = {
+        "person_ids": person_id,
+        "begin_date": "2026-09-28",
+        "end_date": "2026-10-10",
+        "expand": "homework,materials,marks"
+    }
+    events_resp = requests.get(events_url, headers=ev_headers, params=ev_params)
+    print("Events with materials status:", events_resp.status_code)
+    if events_resp.status_code == 200:
+        ev_data = events_resp.json().get("response", [])
+        print(f"Total events found: {len(ev_data)}")
+        materials_count = sum(1 for ev in ev_data if ev.get("materials"))
+        print(f"Events with materials: {materials_count}")
+else:
+    print("person_id not found in token")

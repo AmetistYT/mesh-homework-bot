@@ -244,7 +244,53 @@ def get_vps_token_info():
     except Exception:
         return {}
 
-def update_vps(token: str, refresh_token: str = None, cookies_str: str = None, cookies_json: str = None):
+def get_local_token_info():
+    if not os.path.exists(LOCAL_DB):
+        return {}
+    try:
+        conn = sqlite3.connect(LOCAL_DB)
+        c = conn.cursor()
+        data = {}
+        for k, v in c.execute("SELECT key, value FROM settings WHERE key IN ('mesh_token', 'mesh_refresh_token', 'mesh_cookies', 'mesh_cookies_json');"):
+            data[k] = v
+        conn.close()
+        return data
+    except Exception:
+        return {}
+
+def extract_from_local_db():
+    info = get_local_token_info()
+    cookies_json_str = info.get("mesh_cookies_json")
+    cookies_rows = []
+    if cookies_json_str:
+        try:
+            clist = json.loads(cookies_json_str)
+            for c in clist:
+                cookies_rows.append((c.get("domain", ".mos.ru"), c["name"], c["value"]))
+        except Exception:
+            pass
+    if not cookies_rows and info.get("mesh_cookies"):
+        for part in info["mesh_cookies"].split(";"):
+            if "=" in part:
+                k, v = part.strip().split("=", 1)
+                cookies_rows.append((".mos.ru", k, v))
+
+    cand_refresh = info.get("mesh_refresh_token")
+    if cookies_rows:
+        acc, ref, updated_cookies = run_sudir_sso_exchange(cookies_rows)
+        if acc:
+            print("Успешное получение свежих токенов через сохраненные куки БД (СУДИР SSO)!")
+            return acc, ref or cand_refresh, updated_cookies or cookies_rows
+
+    if cand_refresh:
+        acc, new_ref = try_v3_refresh(cand_refresh)
+        if acc:
+            print("Успешное обновление токена через сохраненный refresh_token (/v3/token/refresh)!")
+            return acc, new_ref or cand_refresh, cookies_rows
+
+    return None, None, []
+
+def update_vps(token: str, refresh_token: str = None, cookies_str: str = None, cookies_json: str = None, restart_service: bool = False):
     # Copy refresh_mesh_sso.py script to VPS
     local_script = os.path.join(os.path.dirname(os.path.abspath(__file__)), "refresh_mesh_sso.py")
     if os.path.exists(local_script):
@@ -307,17 +353,54 @@ def update_vps(token: str, refresh_token: str = None, cookies_str: str = None, c
         ]
         subprocess.run(cmd_rt_env, check=True, timeout=15)
 
-    cmd_restart = [
-        "sshpass", "-p", VPS_PASS,
-        "ssh", "-o", "StrictHostKeyChecking=no", f"{VPS_USER}@{VPS_HOST}",
-        "systemctl restart mesh-homework-bot.service"
-    ]
-    subprocess.run(cmd_restart, check=True, timeout=15)
+    if restart_service:
+        cmd_restart = [
+            "sshpass", "-p", VPS_PASS,
+            "ssh", "-o", "StrictHostKeyChecking=no", f"{VPS_USER}@{VPS_HOST}",
+            "systemctl restart mesh-homework-bot.service"
+        ]
+        subprocess.run(cmd_restart, check=True, timeout=15)
+        print("mesh-homework-bot.service на VPS перезапущен.")
 
 def main():
+    local_info = get_local_token_info()
+    vps_info = get_vps_token_info()
+
+    local_token = local_info.get("mesh_token", "")
+    local_rt = local_info.get("mesh_refresh_token", "")
+    vps_token = vps_info.get("mesh_token", "")
+    vps_rt = vps_info.get("mesh_refresh_token", "")
+
+    # Проверяем запас по времени (2 часа = 7200 сек)
+    local_valid = is_jwt_valid_and_not_expired(local_token, margin_seconds=7200)
+    vps_valid = is_jwt_valid_and_not_expired(vps_token, margin_seconds=7200)
+
+    # Если токены локально и на VPS валидны и синхронизированы — ротация не требуется
+    if local_valid and vps_valid and (local_token == vps_token):
+        exp = get_token_exp(local_token)
+        now = datetime.datetime.now(datetime.timezone.utc).timestamp()
+        hours_left = (exp - now) / 3600.0
+        print(f"Токены на локальной машине и VPS актуальны (осталось {hours_left:.1f} ч.). Ротация не требуется.")
+        return
+
+    # Если локальный токен валиден, но на VPS устарел или отличается
+    if local_valid and not vps_valid:
+        print("Локальный токен валиден, но на VPS токен устарел или отсутствует. Синхронизируем VPS...")
+        update_vps(local_token, local_rt, local_info.get("mesh_cookies"), local_info.get("mesh_cookies_json"), restart_service=True)
+        print("VPS успешно обновлен действующим локальным токеном!")
+        return
+
+    # Требуется обновление токена:
+    # 1. Сначала пробуем получить с подключенного по adb устройства
     token, refresh_token, cookies_rows = extract_from_device()
+
+    # 2. Если устройство недоступно, используем сохраненные куки и refresh_token из БД
     if not token:
-        print("Не найден активный токен на подключенных устройствах.")
+        print("Подключенные устройства не найдены или не отдали сессию. Пробуем обновить через сохраненную сессию БД...")
+        token, refresh_token, cookies_rows = extract_from_local_db()
+
+    if not token:
+        print("Не удалось обновить токен ни через adb-устройства, ни через сессию БД.")
         return
 
     exp = get_token_exp(token)
@@ -344,24 +427,14 @@ def main():
     update_local(token, refresh_token, cookies_str, cookies_json)
     print("Локальные DB и .env синхронизированы.")
 
-    # 2. Проверяем состояние VPS
-    vps_info = get_vps_token_info()
-    vps_token = vps_info.get("mesh_token", "")
-    vps_rt = vps_info.get("mesh_refresh_token", "")
-    vps_valid = is_jwt_valid_and_not_expired(vps_token, margin_seconds=7200)
-
-    # Проверяем, жив ли vps_rt
-    vps_rt_alive = False
-    if vps_rt and vps_rt == refresh_token:
-        vps_rt_alive = True
-
-    needs_vps_update = (not vps_valid) or (vps_token != token) or (refresh_token and not vps_rt_alive)
+    # 2. Обновляем VPS при необходимости
+    needs_vps_update = (not vps_valid) or (vps_token != token)
     if needs_vps_update:
-        print(f"Обновление VPS (vps_valid={vps_valid}, token_match={vps_token == token}, rt_alive={vps_rt_alive}). Синхронизируем VPS...")
-        update_vps(token, refresh_token, cookies_str, cookies_json)
-        print("VPS успешно обновлен и mesh-homework-bot.service перезапущен!")
+        print(f"Синхронизируем VPS (vps_valid={vps_valid}, token_match={vps_token == token})...")
+        update_vps(token, refresh_token, cookies_str, cookies_json, restart_service=(not vps_valid))
+        print("VPS успешно синхронизирован!")
     else:
-        print("VPS токен актуален и сервис работает штатно.")
+        print("VPS токен актуален.")
 
 if __name__ == "__main__":
     main()
