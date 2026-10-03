@@ -72,43 +72,60 @@ def run_sudir_sso_exchange(cookies_rows):
 
     try:
         r1 = s.get("https://school.mos.ru/v3/auth/sudir/login", allow_redirects=True, timeout=15)
-        idx = r1.text.find("url=")
-        if idx == -1:
-            return None, None
+        import re
+        m = re.search(r'url=([^"\' >]+)', r1.text, re.IGNORECASE)
+        if not m:
+            return None, None, []
 
-        next_url = r1.text[idx + 4:].split('"')[0].replace("&amp;", "&")
-        r2 = s.get(next_url, allow_redirects=False, timeout=15)
-        loc = r2.headers.get("Location")
-        if not loc or not loc.startswith("http"):
-            return None, None
+        next_url = m.group(1).replace("&amp;", "&")
+        if not next_url.startswith("http"):
+            next_url = "https://login.mos.ru" + next_url
 
-        r3 = s.get(loc, allow_redirects=False, timeout=15)
-        if r3.status_code != 200:
-            return None, None
+        r2 = s.get(next_url, allow_redirects=True, timeout=15)
+        if r2.status_code != 200:
+            return None, None, []
 
         acc = None
         ref = None
         for c in s.cookies:
-            if c.name == "aupd_token":
-                acc = c.value
-            elif c.name == "aupd_refresh_token":
+            if c.name in ("aupd_token", "auth_token") and is_jwt_valid_and_not_expired(c.value):
+                if acc is None or c.name == "aupd_token":
+                    acc = c.value
+            elif c.name in ("aupd_refresh_token", "refresh_token"):
                 ref = c.value
 
-        if ref:
-            # Сразу ротируем через /v3/token/refresh для получения гарантированно рабочей пары токенов
-            r_acc, r_ref = try_v3_refresh(ref)
-            if r_acc:
-                return r_acc, r_ref or ref
-            return acc, ref
+        updated_cookies = []
+        for c in s.cookies:
+            updated_cookies.append((c.domain, c.name, c.value))
+
+        return acc, ref, updated_cookies
     except Exception as e:
         print(f"Ошибка в run_sudir_sso_exchange: {e}")
 
-    return None, None
+    return None, None, []
 
-def extract_from_device(device_ids=("10.8.1.1:5555", "emulator-5554")):
+def get_connected_devices():
+    try:
+        out = subprocess.check_output(["adb", "devices"], text=True)
+        devs = []
+        for line in out.splitlines()[1:]:
+            parts = line.strip().split()
+            if len(parts) >= 2 and parts[1] == "device":
+                devs.append(parts[0])
+        return devs
+    except Exception:
+        return []
+
+def extract_from_device(device_ids=None):
+    if not device_ids:
+        device_ids = get_connected_devices()
+    if not device_ids:
+        device_ids = ["192.168.0.118:5555", "localhost:5555", "emulator-5554"]
+
     for dev in device_ids:
         cookies_rows = []
         candidate_refresh_tokens = []
+        candidate_tokens = []
 
         # 1. Извлекаем Cookies из SQLite базы приложения ru.mesh.expressive или других
         with tempfile.NamedTemporaryFile(suffix=".db", delete=False) as tmp_file:
@@ -133,6 +150,8 @@ def extract_from_device(device_ids=("10.8.1.1:5555", "emulator-5554")):
                     cookies_rows.append((host_key, name, val))
                     if name in ("aupd_refresh_token", "refresh_token"):
                         candidate_refresh_tokens.append(val)
+                    elif name in ("aupd_token", "auth_token"):
+                        candidate_tokens.append(val)
                 conn.close()
         except Exception:
             pass
@@ -140,19 +159,34 @@ def extract_from_device(device_ids=("10.8.1.1:5555", "emulator-5554")):
             if os.path.exists(tmp_path):
                 os.remove(tmp_path)
 
-        # Проверяем существующие refresh_token кандидаты
+        # 2. Если есть Cookies, запускаем SSO обмен через сессию mos.ru
+        if cookies_rows:
+            acc, ref, updated_cookies = run_sudir_sso_exchange(cookies_rows)
+            if acc:
+                print("Успешное получение свежих токенов через СУДИР SSO flow!")
+                return acc, ref, updated_cookies or cookies_rows
+
+        # 3. Проверяем существующие refresh_token кандидаты
         for cr in set(candidate_refresh_tokens):
             acc, new_ref = try_v3_refresh(cr)
             if acc:
                 print("Успешное прямое обновление токена через /v3/token/refresh!")
                 return acc, new_ref or cr, cookies_rows
 
-        # Если прямое обновление не дало результата, запускаем SSO обмен через сессию mos.ru
-        if cookies_rows:
-            acc, ref = run_sudir_sso_exchange(cookies_rows)
-            if acc:
-                print("Успешное получение свежих токенов через СУДИР SSO flow!")
-                return acc, ref, cookies_rows
+        # 4. Проверяем токены из shared_prefs/mesh_expressive_prefs.xml
+        try:
+            prefs_cmd = ["adb", "-s", dev, "shell", 'su -c "cat /data/data/ru.mesh.expressive/shared_prefs/mesh_expressive_prefs.xml 2>/dev/null"']
+            res_prefs = subprocess.run(prefs_cmd, capture_output=True, text=True, timeout=6)
+            if res_prefs.returncode == 0 and res_prefs.stdout:
+                import re
+                m_tok = re.search(r'<string name="auth_token">([^<]+)</string>', res_prefs.stdout)
+                if m_tok:
+                    t = m_tok.group(1).strip()
+                    if is_jwt_valid_and_not_expired(t):
+                        print("Успешно извлечен действующий auth_token из shared_prefs!")
+                        return t, None, cookies_rows
+        except Exception:
+            pass
 
     return None, None, []
 
