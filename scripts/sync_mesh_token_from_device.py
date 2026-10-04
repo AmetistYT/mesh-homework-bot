@@ -8,11 +8,11 @@ import datetime
 import tempfile
 import requests
 
-VPS_HOST = "127.0.0.1"
-VPS_USER = "root"
-VPS_PASS = ""
-LOCAL_DB = "/home/ametist1337/projects/mesh-homework-bot/data/homeworks.db"
-LOCAL_ENV = "/home/ametist1337/projects/mesh-homework-bot/.env"
+VPS_HOST = os.environ.get("VPS_HOST", "127.0.0.1")
+VPS_USER = os.environ.get("VPS_USER", "root")
+VPS_PASS = os.environ.get("VPS_PASS", "")
+LOCAL_DB = os.environ.get("LOCAL_DB", os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "data", "homeworks.db"))
+LOCAL_ENV = os.environ.get("LOCAL_ENV", os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), ".env"))
 
 def is_jwt_valid_and_not_expired(token: str, margin_seconds: int = 30) -> bool:
     if not token or len(token) <= 20:

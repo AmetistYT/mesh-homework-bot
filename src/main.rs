@@ -84,22 +84,42 @@ async fn main() -> Result<()> {
 
     let prompt_builder = PromptBuilder::new(&cfg.textbooks_dir, &cfg.rules_dir);
 
-    let solver_mode = if cfg.solver_mode == "remote_ssh" {
-        info!("Режим работы solver: Remote SSH ({}:{})", cfg.ssh_host, cfg.ssh_port);
-        SolverMode::RemoteSsh {
-            host: cfg.ssh_host.clone(),
-            user: cfg.ssh_user.clone(),
-            port: cfg.ssh_port,
-            agy_bin: cfg.agy_bin.clone(),
+    let (solver_mode, active_model) = match cfg.solver_mode.to_lowercase().as_str() {
+        "remote_ssh" => {
+            info!("Режим работы solver: Remote SSH ({}:{})", cfg.ssh_host, cfg.ssh_port);
+            (
+                SolverMode::RemoteSsh {
+                    host: cfg.ssh_host.clone(),
+                    user: cfg.ssh_user.clone(),
+                    port: cfg.ssh_port,
+                    agy_bin: cfg.agy_bin.clone(),
+                },
+                cfg.agy_model.clone(),
+            )
         }
-    } else {
-        info!("Режим работы solver: Local binary ({})", cfg.agy_bin);
-        SolverMode::Local {
-            agy_bin: cfg.agy_bin.clone(),
+        "api" | "openai" | "openrouter" | "gemini" => {
+            info!("Режим работы solver: HTTP API ({}, модель: {})", cfg.api_base_url, cfg.api_model);
+            (
+                SolverMode::Api {
+                    base_url: cfg.api_base_url.clone(),
+                    api_key: cfg.api_key.clone(),
+                    model: cfg.api_model.clone(),
+                },
+                cfg.api_model.clone(),
+            )
+        }
+        _ => {
+            info!("Режим работы solver: Local binary ({})", cfg.agy_bin);
+            (
+                SolverMode::Local {
+                    agy_bin: cfg.agy_bin.clone(),
+                },
+                cfg.agy_model.clone(),
+            )
         }
     };
 
-    info!("Модель solver (agy): {}", cfg.agy_model);
+    info!("Активная модель solver: {}", active_model);
     let project_dir = std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from("."));
     let solver_runner = SolverRunner::new(
         solver_mode,
@@ -108,7 +128,7 @@ async fn main() -> Result<()> {
         project_dir,
         Some(cfg.tg_bot_token.clone()),
         Some(cfg.db_path.clone()),
-        cfg.agy_model.clone(),
+        active_model,
     );
 
     let (event_tx, event_rx) = mpsc::channel(32);

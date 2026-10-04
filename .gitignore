@@ -1,9 +1,36 @@
 /target
+target/
 
+# Environment and secrets
 .env
+.env.*
+!.env.example
+
+# Local databases and runtime state
 data/
 *.db
 *.db-wal
 *.db-shm
+*.sqlite
+*.sqlite3
+
+# Python cache and virtual environments
 venv/
+.venv/
+__pycache__/
+*.py[cod]
+*$py.class
 scripts/__pycache__/
+
+# Textbooks and heavy assets (kept locally, not in git)
+textbooks*/
+textbooks/
+*.pdf
+*.djvu
+*.epub
+
+# Exports and generated temporary files
+exports/
+*.log
+.playwright-mcp/
+.gemini/

@@ -14,6 +14,11 @@ pub enum SolverMode {
         port: u16,
         agy_bin: String,
     },
+    Api {
+        base_url: String,
+        api_key: String,
+        model: String,
+    },
 }
 
 use std::path::{Path, PathBuf};
@@ -70,6 +75,10 @@ impl SolverRunner {
                     port,
                     agy_bin,
                 } => self.solve_ssh(host, user, *port, agy_bin, prompt, model).await,
+                SolverMode::Api { base_url, api_key, model: default_model } => {
+                    let m = if model.is_empty() || model == "default" { default_model } else { model };
+                    self.solve_api(base_url, api_key, prompt, m).await
+                }
             }
         };
 
@@ -89,7 +98,7 @@ impl SolverRunner {
         chat_id: Option<&str>,
         conversation_id: Option<&str>,
     ) -> Result<(String, Option<String>)> {
-        info!("Запрос к нейросети через agy (чат, модель: {}, conv_id: {:?})...", model, conversation_id);
+        info!("Запрос к нейросети (чат, модель: {}, conv_id: {:?})...", model, conversation_id);
 
         let run_fut = async {
             match &self.mode {
@@ -100,6 +109,10 @@ impl SolverRunner {
                     port,
                     agy_bin,
                 } => self.solve_ssh_chat(host, user, *port, agy_bin, prompt, model, chat_id, conversation_id).await,
+                SolverMode::Api { base_url, api_key, model: default_model } => {
+                    let m = if model.is_empty() || model == "default" { default_model } else { model };
+                    self.solve_api_chat(base_url, api_key, prompt, m, chat_id, conversation_id).await
+                }
             }
         };
 
@@ -537,6 +550,122 @@ impl SolverRunner {
         Ok((chat_cleaned, conversation_id.map(|s| s.to_string())))
     }
 
+    fn format_api_endpoint(base_url: &str) -> String {
+        let trimmed = base_url.trim().trim_end_matches('/');
+        if trimmed.ends_with("/chat/completions") {
+            trimmed.to_string()
+        } else {
+            format!("{}/chat/completions", trimmed)
+        }
+    }
+
+    async fn solve_api(&self, base_url: &str, api_key: &str, prompt: &str, model: &str) -> Result<String> {
+        let endpoint = Self::format_api_endpoint(base_url);
+        info!("Вызов LLM API ({}) для модели {}...", endpoint, model);
+
+        let client = reqwest::Client::builder()
+            .timeout(Duration::from_secs(self.timeout_secs))
+            .build()?;
+
+        let mut req = client.post(&endpoint);
+        if !api_key.trim().is_empty() {
+            req = req.header("Authorization", format!("Bearer {}", api_key.trim()));
+        }
+
+        let body = serde_json::json!({
+            "model": model,
+            "messages": [
+                {
+                    "role": "system",
+                    "content": "Ты решатель школьных домашних заданий и тестов. Отвечай подробно, по шагам, строго следуя структуре запроса, без лишних общих фраз и без эмодзи."
+                },
+                {
+                    "role": "user",
+                    "content": prompt
+                }
+            ],
+            "temperature": 0.2
+        });
+
+        let resp = req.json(&body).send().await
+            .context("Ошибка сетевого запроса к LLM API")?;
+
+        let status = resp.status();
+        if !status.is_success() {
+            let err_body = resp.text().await.unwrap_or_default();
+            return Err(anyhow!("LLM API вернул ошибку {}: {}", status, err_body));
+        }
+
+        let json_resp: serde_json::Value = resp.json().await
+            .context("Ошибка парсинга ответа LLM API")?;
+
+        let content = json_resp["choices"][0]["message"]["content"]
+            .as_str()
+            .ok_or_else(|| anyhow!("Ответ LLM API не содержит choices[0].message.content: {}", json_resp))?;
+
+        Ok(Self::clean_solution(content))
+    }
+
+    async fn solve_api_chat(
+        &self,
+        base_url: &str,
+        api_key: &str,
+        prompt: &str,
+        model: &str,
+        _chat_id: Option<&str>,
+        conversation_id: Option<&str>,
+    ) -> Result<(String, Option<String>)> {
+        let endpoint = Self::format_api_endpoint(base_url);
+        info!("Вызов LLM API чата ({}) для модели {}...", endpoint, model);
+
+        let client = reqwest::Client::builder()
+            .timeout(Duration::from_secs(self.timeout_secs))
+            .build()?;
+
+        let mut req = client.post(&endpoint);
+        if !api_key.trim().is_empty() {
+            req = req.header("Authorization", format!("Bearer {}", api_key.trim()));
+        }
+
+        let body = serde_json::json!({
+            "model": model,
+            "messages": [
+                {
+                    "role": "system",
+                    "content": "Ты бот-помощник в учебном Telegram чате. Отвечай грамотно, вежливо, емко и по существу, строго без эмодзи."
+                },
+                {
+                    "role": "user",
+                    "content": prompt
+                }
+            ],
+            "temperature": 0.4
+        });
+
+        let resp = req.json(&body).send().await
+            .context("Ошибка сетевого запроса к LLM API (чат)")?;
+
+        let status = resp.status();
+        if !status.is_success() {
+            let err_body = resp.text().await.unwrap_or_default();
+            return Err(anyhow!("LLM API чата вернул ошибку {}: {}", status, err_body));
+        }
+
+        let json_resp: serde_json::Value = resp.json().await
+            .context("Ошибка парсинга ответа LLM API (чат)")?;
+
+        let content = json_resp["choices"][0]["message"]["content"]
+            .as_str()
+            .ok_or_else(|| anyhow!("Ответ LLM API не содержит choices[0].message.content: {}", json_resp))?;
+
+        let ansi_cleaned = Self::strip_ansi(content);
+        let latex_cleaned = crate::solver::latex::clean_latex(&ansi_cleaned);
+        let chat_cleaned = crate::solver::humanizer::Humanizer::clean_chat_reply(&latex_cleaned);
+        let emoji_cleaned = crate::solver::humanizer::Humanizer::strip_emojis(&chat_cleaned);
+
+        Ok((emoji_cleaned, conversation_id.map(|s| s.to_string())))
+    }
+
     fn clean_solution(raw: &str) -> String {
         let ansi_cleaned = Self::strip_ansi(raw);
         let latex_cleaned = crate::solver::latex::clean_latex(&ansi_cleaned);
@@ -565,5 +694,25 @@ mod tests {
 
         let sample_cyrillic = "Простой русский текст без кодов";
         assert_eq!(SolverRunner::strip_ansi(sample_cyrillic), "Простой русский текст без кодов");
+    }
+
+    #[test]
+    fn test_format_api_endpoint() {
+        assert_eq!(
+            SolverRunner::format_api_endpoint("https://openrouter.ai/api/v1"),
+            "https://openrouter.ai/api/v1/chat/completions"
+        );
+        assert_eq!(
+            SolverRunner::format_api_endpoint("https://openrouter.ai/api/v1/"),
+            "https://openrouter.ai/api/v1/chat/completions"
+        );
+        assert_eq!(
+            SolverRunner::format_api_endpoint("https://api.openai.com/v1/chat/completions"),
+            "https://api.openai.com/v1/chat/completions"
+        );
+        assert_eq!(
+            SolverRunner::format_api_endpoint("http://localhost:11434/v1"),
+            "http://localhost:11434/v1/chat/completions"
+        );
     }
 }

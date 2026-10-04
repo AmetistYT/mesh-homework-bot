@@ -24,6 +24,9 @@ pub struct Config {
     pub auto_mark_done: bool,
     pub solver_timeout_secs: u64,
     pub agy_model: String,
+    pub api_base_url: String,
+    pub api_key: String,
+    pub api_model: String,
 }
 
 impl Config {
@@ -95,6 +98,20 @@ impl Config {
 
         let agy_model = env::var("AGY_MODEL").unwrap_or_else(|_| "gemini-3.8-flash-medium".to_string());
 
+        let api_base_url = env::var("API_BASE_URL")
+            .or_else(|_| env::var("OPENAI_BASE_URL"))
+            .unwrap_or_else(|_| "https://openrouter.ai/api/v1".to_string());
+
+        let api_key = env::var("API_KEY")
+            .or_else(|_| env::var("OPENAI_API_KEY"))
+            .or_else(|_| env::var("OPENROUTER_API_KEY"))
+            .or_else(|_| env::var("GEMINI_API_KEY"))
+            .unwrap_or_default();
+
+        let api_model = env::var("API_MODEL")
+            .or_else(|_| env::var("OPENAI_MODEL"))
+            .unwrap_or_else(|_| "google/gemini-2.5-flash".to_string());
+
         Self {
             mesh_token,
             mesh_refresh_token,
@@ -117,6 +134,9 @@ impl Config {
             auto_mark_done,
             solver_timeout_secs,
             agy_model,
+            api_base_url,
+            api_key,
+            api_model,
         }
     }
 }
