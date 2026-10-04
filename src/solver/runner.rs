@@ -1,7 +1,7 @@
 use anyhow::{anyhow, Context, Result};
 use std::time::Duration;
 use tokio::process::Command;
-use tracing::info;
+use tracing::{info, warn};
 
 #[derive(Debug, Clone)]
 pub enum SolverMode {
@@ -82,18 +82,24 @@ impl SolverRunner {
         }
     }
 
-    pub async fn ask_chat(&self, prompt: &str, model: &str, chat_id: Option<&str>) -> Result<String> {
-        info!("Запрос к нейросети через agy (чат, модель: {})...", model);
+    pub async fn ask_chat(
+        &self,
+        prompt: &str,
+        model: &str,
+        chat_id: Option<&str>,
+        conversation_id: Option<&str>,
+    ) -> Result<(String, Option<String>)> {
+        info!("Запрос к нейросети через agy (чат, модель: {}, conv_id: {:?})...", model, conversation_id);
 
         let run_fut = async {
             match &self.mode {
-                SolverMode::Local { agy_bin } => self.solve_local_chat(agy_bin, prompt, model, chat_id).await,
+                SolverMode::Local { agy_bin } => self.solve_local_chat(agy_bin, prompt, model, chat_id, conversation_id).await,
                 SolverMode::RemoteSsh {
                     host,
                     user,
                     port,
                     agy_bin,
-                } => self.solve_ssh_chat(host, user, *port, agy_bin, prompt, model, chat_id).await,
+                } => self.solve_ssh_chat(host, user, *port, agy_bin, prompt, model, chat_id, conversation_id).await,
             }
         };
 
@@ -106,7 +112,33 @@ impl SolverRunner {
         }
     }
 
-    async fn solve_local_chat(&self, agy_bin: &str, prompt: &str, model: &str, chat_id: Option<&str>) -> Result<String> {
+    pub fn get_latest_local_agy_conversation_id() -> Option<String> {
+        let home = std::env::var("HOME").ok()?;
+        let db_path = std::path::Path::new(&home).join(".gemini/antigravity-cli/conversation_summaries.db");
+        if !db_path.exists() {
+            return None;
+        }
+        let conn = rusqlite::Connection::open_with_flags(
+            db_path,
+            rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY | rusqlite::OpenFlags::SQLITE_OPEN_NO_MUTEX,
+        ).ok()?;
+        let mut stmt = conn.prepare("SELECT conversation_id FROM conversation_summaries ORDER BY last_modified_time DESC LIMIT 1").ok()?;
+        let mut rows = stmt.query([]).ok()?;
+        if let Some(row) = rows.next().ok()? {
+            let id: String = row.get(0).ok()?;
+            return Some(id);
+        }
+        None
+    }
+
+    async fn solve_local_chat(
+        &self,
+        agy_bin: &str,
+        prompt: &str,
+        model: &str,
+        chat_id: Option<&str>,
+        conversation_id: Option<&str>,
+    ) -> Result<(String, Option<String>)> {
         let bin_path = if std::path::Path::new(agy_bin).is_absolute() && std::path::Path::new(agy_bin).exists() {
             agy_bin.to_string()
         } else if std::path::Path::new("/usr/local/bin/agy").exists() {
@@ -132,6 +164,12 @@ impl SolverRunner {
             .arg(model)
             .env("LANG", "en_US.UTF-8")
             .env("LC_ALL", "en_US.UTF-8");
+
+        if let Some(cid) = conversation_id {
+            if !cid.trim().is_empty() {
+                cmd.arg("--conversation").arg(cid.trim());
+            }
+        }
 
         if let Some(token) = &self.tg_bot_token {
             cmd.env("TELEGRAM_BOT_TOKEN", token);
@@ -169,6 +207,12 @@ impl SolverRunner {
         if !output.status.success() {
             let stderr = String::from_utf8_lossy(&output.stderr);
             let stdout = String::from_utf8_lossy(&output.stdout);
+
+            if conversation_id.is_some() {
+                warn!("agy завершился с ошибкой при продолжении беседы {:?}, перезапуск с нового диалога...", conversation_id);
+                return Box::pin(self.solve_local_chat(agy_bin, prompt, model, chat_id, None)).await;
+            }
+
             return Err(anyhow!(
                 "agy завершился с ошибкой:\nstdout: {}\nstderr: {}",
                 stdout,
@@ -180,7 +224,14 @@ impl SolverRunner {
         let ansi_cleaned = Self::strip_ansi(&solution);
         let latex_cleaned = crate::solver::latex::clean_latex(&ansi_cleaned);
         let chat_cleaned = crate::solver::humanizer::Humanizer::clean_chat_reply(&latex_cleaned);
-        Ok(chat_cleaned)
+
+        let conv_out = if let Some(cid) = conversation_id {
+            Some(cid.to_string())
+        } else {
+            Self::get_latest_local_agy_conversation_id()
+        };
+
+        Ok((chat_cleaned, conv_out))
     }
 
     pub fn strip_ansi(raw: &str) -> String {
@@ -399,7 +450,8 @@ impl SolverRunner {
         prompt: &str,
         model: &str,
         chat_id: Option<&str>,
-    ) -> Result<String> {
+        conversation_id: Option<&str>,
+    ) -> Result<(String, Option<String>)> {
         let run_dir = if self.project_dir.exists() {
             self.project_dir.clone()
         } else {
@@ -418,12 +470,23 @@ impl SolverRunner {
         }
         env_vars.push_str(&format!(" PYTHONPATH='{}'", run_dir.display()));
 
+        let conv_arg = if let Some(cid) = conversation_id {
+            if !cid.trim().is_empty() {
+                format!(" --conversation '{}'", cid.trim().replace('\'', "'\\''"))
+            } else {
+                String::new()
+            }
+        } else {
+            String::new()
+        };
+
         let remote_cmd = format!(
-            "cd {} && {} {} --dangerously-skip-permissions --model {}",
+            "cd {} && {} {} --dangerously-skip-permissions --model {}{}",
             run_dir.display(),
             env_vars,
             agy_bin,
-            model
+            model,
+            conv_arg
         );
 
         let mut cmd = Command::new("ssh");
@@ -471,7 +534,7 @@ impl SolverRunner {
         let ansi_cleaned = Self::strip_ansi(&solution);
         let latex_cleaned = crate::solver::latex::clean_latex(&ansi_cleaned);
         let chat_cleaned = crate::solver::humanizer::Humanizer::clean_chat_reply(&latex_cleaned);
-        Ok(chat_cleaned)
+        Ok((chat_cleaned, conversation_id.map(|s| s.to_string())))
     }
 
     fn clean_solution(raw: &str) -> String {

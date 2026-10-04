@@ -8,10 +8,20 @@ use tracing::{info, warn};
 
 #[allow(dead_code)]
 #[derive(Debug, Clone, Deserialize)]
+pub struct TelegramCallbackQuery {
+    pub id: String,
+    pub from: TelegramUser,
+    pub message: Option<TelegramMessage>,
+    pub data: Option<String>,
+}
+
+#[allow(dead_code)]
+#[derive(Debug, Clone, Deserialize)]
 pub struct TelegramUpdate {
     pub update_id: i64,
     pub message: Option<TelegramMessage>,
     pub edited_message: Option<TelegramMessage>,
+    pub callback_query: Option<TelegramCallbackQuery>,
 }
 
 #[allow(dead_code)]
@@ -562,11 +572,125 @@ impl TelegramClient {
         Ok(())
     }
 
+    pub async fn answer_callback_query(
+        &self,
+        callback_query_id: &str,
+        text: Option<&str>,
+        show_alert: bool,
+    ) -> Result<()> {
+        let mut payload = json!({
+            "callback_query_id": callback_query_id,
+            "show_alert": show_alert,
+        });
+        if let Some(t) = text {
+            payload["text"] = json!(t);
+        }
+        let _ = self
+            .client
+            .post(self.api_url("answerCallbackQuery"))
+            .json(&payload)
+            .send()
+            .await;
+        Ok(())
+    }
+
+    pub async fn send_message_with_keyboard(
+        &self,
+        chat_id: &str,
+        text: &str,
+        reply_markup: Option<serde_json::Value>,
+        reply_to_message_id: Option<i64>,
+    ) -> Result<i64> {
+        let chunks = Self::split_message(text, 4000);
+        let mut last_msg_id = 0;
+
+        for (idx, chunk) in chunks.iter().enumerate() {
+            let chunk_text = if chunks.len() > 1 {
+                format!("[Часть {}/{}]\n{}", idx + 1, chunks.len(), chunk)
+            } else {
+                chunk.clone()
+            };
+
+            let html_text = crate::telegram::formatter::markdown_to_telegram_html(&chunk_text);
+            let mut payload = json!({
+                "chat_id": chat_id,
+                "text": html_text,
+                "parse_mode": "HTML",
+                "disable_web_page_preview": true,
+                "allow_sending_without_reply": true
+            });
+
+            if let Some(reply_id) = reply_to_message_id {
+                if idx == 0 {
+                    payload["reply_to_message_id"] = json!(reply_id);
+                }
+            }
+
+            if idx == chunks.len() - 1 {
+                if let Some(ref markup) = reply_markup {
+                    payload["reply_markup"] = markup.clone();
+                }
+            }
+
+            let resp = self
+                .client
+                .post(self.api_url("sendMessage"))
+                .json(&payload)
+                .send()
+                .await
+                .context("Ошибка выполнения HTTP запроса к Telegram API")?;
+
+            let res: TelegramApiResponse<TelegramMessage> = resp.json().await?;
+            if !res.ok {
+                let mut plain_payload = json!({
+                    "chat_id": chat_id,
+                    "text": chunk_text,
+                    "disable_web_page_preview": true,
+                    "allow_sending_without_reply": true
+                });
+                if let Some(reply_id) = reply_to_message_id {
+                    if idx == 0 {
+                        plain_payload["reply_to_message_id"] = json!(reply_id);
+                    }
+                }
+                if idx == chunks.len() - 1 {
+                    if let Some(ref markup) = reply_markup {
+                        plain_payload["reply_markup"] = markup.clone();
+                    }
+                }
+                let plain_resp = self
+                    .client
+                    .post(self.api_url("sendMessage"))
+                    .json(&plain_payload)
+                    .send()
+                    .await?;
+                let plain_res: TelegramApiResponse<TelegramMessage> = plain_resp.json().await?;
+                if let Some(msg) = plain_res.result {
+                    last_msg_id = msg.message_id;
+                }
+            } else if let Some(msg) = res.result {
+                last_msg_id = msg.message_id;
+            }
+        }
+
+        Ok(last_msg_id)
+    }
+
     pub async fn send_document<P: AsRef<Path>>(
         &self,
         chat_id: &str,
         doc_path: P,
         caption: Option<&str>,
+    ) -> Result<i64> {
+        self.send_document_with_keyboard(chat_id, doc_path, caption, None).await
+    }
+
+    pub async fn send_document_with_keyboard<P: AsRef<Path>>(
+        &self,
+        chat_id: &str,
+        doc_path: P,
+        caption: Option<&str>,
+        reply_markup: Option<serde_json::Value>,
     ) -> Result<i64> {
         let file_bytes = tokio::fs::read(&doc_path).await?;
         let filename = doc_path
@@ -586,6 +710,10 @@ impl TelegramClient {
 
         if let Some(c) = caption {
             form = form.text("caption", c.to_string());
+        }
+
+        if let Some(markup) = reply_markup {
+            form = form.text("reply_markup", serde_json::to_string(&markup).unwrap_or_default());
         }
 
         let resp = self

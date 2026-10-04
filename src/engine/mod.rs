@@ -234,8 +234,7 @@ impl Engine {
             if desc.trim().is_empty() {
                 continue;
             }
-            let is_rus = sub.to_lowercase().contains("русск");
-            let is_cdz = desc.to_lowercase().contains("цдз") || desc.to_lowercase().contains("электронн") || is_rus;
+            let is_cdz = desc.to_lowercase().contains("цдз") || desc.to_lowercase().contains("тест");
             let initial_status = if is_cdz {
                 TaskProgressStatus::Electronic
             } else if self.db.get_homework_solution(item.homework_entry_student_id).ok().flatten().is_some() {
@@ -284,9 +283,9 @@ impl Engine {
                 continue;
             }
 
-            // Русский язык исключен из решения (ЦДЗ)
-            if subject.to_lowercase().contains("русск") {
-                info!("Предмет '{}' исключен из решения (ЦДЗ / сводка)", subject);
+            let is_cdz = desc.to_lowercase().contains("цдз") || desc.to_lowercase().contains("тест");
+            if is_cdz {
+                info!("Задание {} ({}) является ЦДЗ/тестом, пропускаем обычное решение", hw_id, subject);
                 continue;
             }
 
@@ -373,10 +372,7 @@ impl Engine {
             let hw_id = item.homework_entry_student_id;
             let subject = item.subject_name.as_deref().unwrap_or("Предмет");
             let desc = item.description.as_deref().unwrap_or("");
-            let is_rus = subject.to_lowercase().contains("русск");
-            let is_cdz = desc.to_lowercase().contains("цдз")
-                || desc.to_lowercase().contains("электронн")
-                || is_rus;
+            let is_cdz = desc.to_lowercase().contains("цдз") || desc.to_lowercase().contains("тест");
 
             let solution_md = if let Some((_, sol)) = solutions.iter().find(|(s, _)| s == subject) {
                 sol.clone()

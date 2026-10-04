@@ -179,9 +179,14 @@ impl ModerationManager {
         let t_clean = t.trim_start_matches('@').trim();
         let t_lower = t_clean.to_lowercase();
 
-        // Проверяем, не пытается ли явно указать бота
+        // Проверяем, не пытается ли явно указать бота или системные сервисы
         if t_lower == "ew1484_bot" || t_clean == bot_id.to_string() {
             return Err(anyhow!("Невозможно применить действие модерации к самому боту."));
+        }
+        if t_clean == "777000" || t_clean == "1087968824" || t_clean == "136817688"
+            || t_lower == "groupanonymousbot" || t_lower == "telegram" || t_lower == "channel_bot"
+        {
+            return Err(anyhow!("Невозможно применить ограничения к системным аккаунтам Telegram или анонимным администраторам."));
         }
 
         // 1. Если явно указан "reply" или цель пустая / местоимение при наличии reply
@@ -201,6 +206,9 @@ impl ModerationManager {
                 if uid == bot_id {
                     return Err(anyhow!("Команда вызвана в ответ на сообщение бота. Укажите конкретного участника для модерации."));
                 }
+                if uid == 777000 || uid == 1087968824 || uid == 136817688 {
+                    return Err(anyhow!("Невозможно применить ограничения к системным аккаунтам Telegram или анонимным администраторам."));
+                }
                 return Ok((uid, un));
             }
         }
@@ -209,6 +217,9 @@ impl ModerationManager {
         if let Ok(num_id) = t_clean.parse::<i64>() {
             if num_id == bot_id {
                 return Err(anyhow!("Невозможно применить действие модерации к самому боту."));
+            }
+            if num_id == 777000 || num_id == 1087968824 || num_id == 136817688 {
+                return Err(anyhow!("Невозможно применить ограничения к системным аккаунтам Telegram или анонимным администраторам."));
             }
             let un = if let Some((ru_id, ref ru_un, _)) = reply_user {
                 if ru_id == num_id {
@@ -395,13 +406,45 @@ impl ModerationManager {
                 Ok(format!("Пользователь {} разблокирован.", user_display))
             }
             "ban" => {
+                if let Ok(member_info) = tg.get_chat_member(chat_id, user_id).await {
+                    if member_info.status == "creator" {
+                        return Err(anyhow!("Невозможно заблокировать создателя (владельца) группы."));
+                    }
+                    if member_info.status == "administrator" {
+                        let strip_rights = ChatAdminRights {
+                            is_anonymous: Some(false),
+                            can_manage_chat: Some(false),
+                            can_delete_messages: Some(false),
+                            can_manage_video_chats: Some(false),
+                            can_restrict_members: Some(false),
+                            can_promote_members: Some(false),
+                            can_change_info: Some(false),
+                            can_invite_users: Some(false),
+                            can_post_messages: Some(false),
+                            can_edit_messages: Some(false),
+                            can_pin_messages: Some(false),
+                            can_post_stories: Some(false),
+                            can_edit_stories: Some(false),
+                            can_delete_stories: Some(false),
+                            can_manage_topics: Some(false),
+                        };
+                        if let Err(e) = tg.promote_chat_member(chat_id, user_id, &strip_rights).await {
+                            warn!("Не удалось снять права админа перед блокировкой с {}: {}", user_display, e);
+                            return Err(anyhow!(
+                                "Не удалось снять права администратора перед блокировкой с {}. Убедитесь, что у бота включено право 'Назначение администраторов' и он выше в иерархии.",
+                                user_display
+                            ));
+                        }
+                    }
+                }
+
                 let until = action.duration_seconds.filter(|&s| s > 0).map(|s| {
                     let now = Utc::now().timestamp();
                     if s < 30 { now + 35 } else { now + s as i64 }
                 });
                 tg.ban_chat_member(chat_id, user_id, until).await?;
                 if let Some(sec) = action.duration_seconds.filter(|&s| s > 0) {
-                    Ok(format!("Пользователь {} заблокирован на {} сек.", user_display, sec))
+                    Ok(format!("Пользователь {} заблокирован на {}.", user_display, crate::telegram::bot::BotHandler::format_duration_human(sec)))
                 } else {
                     Ok(format!("Пользователь {} заблокирован навсегда.", user_display))
                 }
@@ -1111,6 +1154,20 @@ mod tests {
         let _ = db.save_seen_user(999999, Some("imran777"), "Имран", None, Some("имран"));
         let res3 = ModerationManager::resolve_target_user(&tg, &db, "-100", Some("Имран"), None).await;
         assert_eq!(res3.unwrap(), (999999, Some("@imran777".to_string())));
+
+        // 4. Попытка таргетировать бота или системные сервисы
+        let res_bot = ModerationManager::resolve_target_user(&tg, &db, "-100", Some("@ew1484_bot"), None).await;
+        assert!(res_bot.is_err());
+
+        let res_tg = ModerationManager::resolve_target_user(&tg, &db, "-100", Some("777000"), None).await;
+        assert!(res_tg.is_err());
+
+        let res_anon = ModerationManager::resolve_target_user(&tg, &db, "-100", Some("@GroupAnonymousBot"), None).await;
+        assert!(res_anon.is_err());
+
+        let sys_reply = Some((777000, Some("@Telegram".to_string()), Some("Telegram".to_string())));
+        let res_sys_reply = ModerationManager::resolve_target_user(&tg, &db, "-100", Some("reply"), sys_reply).await;
+        assert!(res_sys_reply.is_err());
     }
 
     #[test]

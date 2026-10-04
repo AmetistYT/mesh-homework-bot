@@ -3,11 +3,14 @@ use tokio::sync::mpsc;
 use tracing::{info, warn};
 
 use crate::db::Database;
+use crate::mesh::cdz_client::CdzClient;
 use crate::mesh::models::EventCalendarItem;
 use crate::mesh::MeshClient;
+use crate::solver::cdz::CdzSolver;
+use crate::solver::VisualRenderer;
 use crate::telegram::client::TelegramClient;
 use crate::telegram::moderation::ModerationManager;
-use crate::solver::VisualRenderer;
+
 
 #[derive(Debug, Clone)]
 pub enum TargetDay {
@@ -66,6 +69,10 @@ impl BotHandler {
                 Ok(updates) => {
                     for u in updates {
                         offset = Some(u.update_id + 1);
+
+                        if let Some(cb) = u.callback_query {
+                            self.handle_callback_query(cb).await;
+                        }
 
                         if let Some(msg) = u.message {
                             let message_id = msg.message_id;
@@ -165,7 +172,10 @@ impl BotHandler {
                             let is_private = msg.chat.chat_type == "private";
 
                             if is_direct_moderation_command(raw_text) {
-                                self.handle_direct_moderation(&chat_id, message_id, from_id, raw_text, is_ametist, is_admin, reply_user).await;
+                                let has_reply = msg.reply_to_message.is_some();
+                                self.handle_direct_moderation(&chat_id, message_id, from_id, raw_text, is_ametist, is_admin, reply_user, has_reply).await;
+                            } else if is_clear_command(raw_text) {
+                                self.handle_clear_command(&chat_id, message_id, from_username, from_id, is_ametist).await;
                             } else if raw_text.starts_with('/') {
                                 self.handle_command(&chat_id, message_id, raw_text, from_username, from_id, is_admin).await;
                             } else if is_dispute_natural {
@@ -238,6 +248,41 @@ impl BotHandler {
         }
     }
 
+    async fn handle_callback_query(&self, cb: crate::telegram::client::TelegramCallbackQuery) {
+        let chat_id = match cb.message.as_ref() {
+            Some(m) => m.chat.id.to_string(),
+            None => return,
+        };
+        let message_id = cb.message.as_ref().map(|m| m.message_id).unwrap_or(0);
+        let data = cb.data.as_deref().unwrap_or("").trim();
+
+        info!("Получен callback_query '{}' от user_id: {}", data, cb.from.id);
+
+        if data == "cdz:refresh" {
+            let _ = self.tg.answer_callback_query(&cb.id, Some("Обновляю список ЦДЗ..."), false).await;
+            self.handle_cdz_command(&chat_id, message_id, &[]).await;
+            return;
+        }
+
+        if let Some(id_str) = data.strip_prefix("cdz:solve:") {
+            if let Ok(target_id) = id_str.parse::<i64>() {
+                let _ = self.tg.answer_callback_query(&cb.id, Some("Запускаю решение теста..."), false).await;
+                self.start_cdz_solve(&chat_id, message_id, Some(target_id), false).await;
+                return;
+            }
+        }
+
+        if let Some(id_str) = data.strip_prefix("cdz:submit:") {
+            if let Ok(target_id) = id_str.parse::<i64>() {
+                let _ = self.tg.answer_callback_query(&cb.id, Some("Запускаю решение и сдачу в МЭШ..."), false).await;
+                self.start_cdz_solve(&chat_id, message_id, Some(target_id), true).await;
+                return;
+            }
+        }
+
+        let _ = self.tg.answer_callback_query(&cb.id, None, false).await;
+    }
+
     async fn handle_command(
         &self,
         chat_id: &str,
@@ -255,15 +300,21 @@ impl BotHandler {
         });
 
         match cmd.as_str() {
+            "/clear" | "/clear@ew1484_bot" | "/reset" | "/reset@ew1484_bot" => {
+                self.handle_clear_command(chat_id, message_id, from_username, from_id, is_ametist).await;
+            }
             "/start" | "/help" | "/start@ew1484_bot" | "/help@ew1484_bot" => {
                 let msg = "Бот автоматического решения домашних заданий МЭШ.\n\n\
                 Доступные команды:\n\
                 ! <вопрос> - задать вопрос нейросети (объяснить ДЗ, разобрать тему, доступно всем)\n\
+                !/clear - начать новый чат в agy и очистить контекст диалога (только @ametist1337)\n\
                 /спор, !спор - детальный разбор последнего конфликта или спора в чате\n\
                 !мут <время> (в ответ на сообщение) - замутить нарушителя\n\
                 /dz - решение ДЗ на завтра (только @ametist1337)\n\
                 /dz <день недели> - решение на любой день (пн, вт, ср, чт, пт, сб, вс)\n\
                 /dz сегодня - решение заданий на сегодня\n\
+                /cdz - просмотр активных цифровых домашних заданий (ЦДЗ)\n\
+                /cdz solve <ID> [--submit] - решение теста нейросетью и автосдача в МЭШ\n\
                 /status - текущее состояние сервиса и статистика\n\
                 /sync - синхронизация переписки через Telethon (админ)\n\
                 /check - принудительная проверка заданий (админ)\n\
@@ -445,8 +496,16 @@ impl BotHandler {
             "/спор" | "/dispute" | "/спор@ew1484_bot" | "/dispute@ew1484_bot" => {
                 self.handle_dispute_summary(chat_id, message_id).await;
             }
+            "/cdz" | "/цдз" | "/test" | "/tests" | "/тест" | "/тесты" | "/cdz@ew1484_bot" | "/цдз@ew1484_bot" => {
+                if !is_ametist && !is_admin {
+                    let _ = self.tg.send_message(chat_id, "Команда /cdz доступна только @ametist1337.").await;
+                    return;
+                }
+                self.handle_cdz_command(chat_id, message_id, &parts).await;
+            }
             _ => {}
         }
+
     }
 
     async fn handle_direct_moderation(
@@ -458,6 +517,7 @@ impl BotHandler {
         is_ametist: bool,
         is_admin: bool,
         reply_user: Option<(i64, Option<String>, Option<String>)>,
+        has_reply: bool,
     ) {
         let mut has_permission = is_ametist || is_admin;
         if !has_permission {
@@ -532,11 +592,16 @@ impl BotHandler {
             match found {
                 Some(t) => t,
                 None => {
+                    let msg_text = if has_reply {
+                        "Не удалось определить пользователя из ответа (возможно, сообщение отправлено от имени канала или является системным). Укажите @username или числовой ID нарушителя."
+                    } else {
+                        "Ответьте на сообщение нарушителя (reply) или укажите @username / ID."
+                    };
                     let _ = self
                         .tg
                         .send_message_reply(
                             chat_id,
-                            "Ответьте на сообщение нарушителя (reply) или укажите @username / ID.",
+                            msg_text,
                             Some(message_id),
                         )
                         .await;
@@ -548,9 +613,24 @@ impl BotHandler {
         let target_uid = target.0;
         let target_mention = target.1.as_deref().unwrap_or(&target.2);
 
-        // Защита: нельзя замутить или забанить самого бота
-        if target.1.as_deref().map_or(false, |u| u.trim_start_matches('@').eq_ignore_ascii_case("ew1484_bot")) {
+        // Защита: нельзя применить ограничения к самому боту или системным аккаунтам
+        let bot_id = self.tg.bot_id();
+        let is_target_bot = target_uid == bot_id
+            || target.1.as_deref().map_or(false, |u| u.trim_start_matches('@').eq_ignore_ascii_case("ew1484_bot"));
+        if is_target_bot {
             let _ = self.tg.send_message_reply(chat_id, "Невозможно применить ограничения к самому боту.", Some(message_id)).await;
+            return;
+        }
+
+        let is_system = target_uid == 777000 || target_uid == 1087968824 || target_uid == 136817688
+            || target.1.as_deref().map_or(false, |u| {
+                let cl = u.trim_start_matches('@');
+                cl.eq_ignore_ascii_case("groupanonymousbot")
+                    || cl.eq_ignore_ascii_case("channel_bot")
+                    || cl.eq_ignore_ascii_case("telegram")
+            });
+        if is_system {
+            let _ = self.tg.send_message_reply(chat_id, "Невозможно применить ограничения к системным аккаунтам Telegram или анонимным администраторам.", Some(message_id)).await;
             return;
         }
 
@@ -758,11 +838,11 @@ impl BotHandler {
                 }
             });
 
-            let res = solver.ask_chat(&prompt, "gemini-3.8-flash-medium", Some(&chat_id_str)).await;
+            let res = solver.ask_chat(&prompt, "gemini-3.8-flash-medium", Some(&chat_id_str), None).await;
             typing_task.abort();
 
             match res {
-                Ok(reply) => {
+                Ok((reply, _)) => {
                     let clean = reply.replace("```telegram_action", "").trim().to_string();
                     let sent_id = tg.send_message_reply(&chat_id_str, &clean, Some(message_id)).await.ok();
                     let _ = tg.set_message_reaction(&chat_id_str, message_id, Some("👍")).await;
@@ -795,52 +875,491 @@ impl BotHandler {
         });
     }
 
+    async fn handle_clear_command(
+        &self,
+        chat_id: &str,
+        message_id: i64,
+        from_username: Option<&str>,
+        from_id: i64,
+        is_ametist: bool,
+    ) {
+        if !is_ametist {
+            warn!(
+                "Отклонена попытка сброса контекста диалога agy: пользователь {:?} (id: {})",
+                from_username, from_id
+            );
+            let _ = self
+                .tg
+                .send_message_reply(chat_id, "Команда доступна только @ametist1337.", Some(message_id))
+                .await;
+            return;
+        }
+
+        let _ = self.tg.set_message_reaction(chat_id, message_id, Some("👀")).await;
+
+        let key = format!("agy_conv_id_{}", chat_id);
+        let old_conv_id = self.db.get_setting(&key).unwrap_or(None);
+        let _ = self.db.delete_setting(&key);
+
+        let now_ts = chrono::Utc::now().timestamp();
+        let _ = self.db.set_setting(&format!("chat_clear_ts_{}", chat_id), &now_ts.to_string());
+
+        // Очищаем локальные файлы беседы agy, если сессия существовала
+        if let Some(ref cid) = old_conv_id {
+            if let Ok(home) = std::env::var("HOME") {
+                let conv_db = std::path::PathBuf::from(&home)
+                    .join(".gemini/antigravity-cli/conversations")
+                    .join(format!("{}.db", cid));
+                if conv_db.exists() {
+                    let _ = std::fs::remove_file(&conv_db);
+                    info!("Удален файл сессии agy: {:?}", conv_db);
+                }
+
+                let sum_db = std::path::PathBuf::from(&home)
+                    .join(".gemini/antigravity-cli/conversation_summaries.db");
+                if sum_db.exists() {
+                    if let Ok(conn) = rusqlite::Connection::open(&sum_db) {
+                        let _ = conn.execute(
+                            "DELETE FROM conversation_summaries WHERE conversation_id = ?1",
+                            rusqlite::params![cid],
+                        );
+                    }
+                }
+            }
+        }
+
+        let reply_text = "Начат новый чат в agy. Контекст диалога очищен.";
+        let _ = self.tg.send_message_reply(chat_id, reply_text, Some(message_id)).await;
+        let _ = self.tg.set_message_reaction(chat_id, message_id, Some("👍")).await;
+        info!(
+            "Сессия agy и контекст для чата {} успешно сброшены пользователем @ametist1337",
+            chat_id
+        );
+    }
+
+    async fn handle_cdz_command(&self, chat_id: &str, message_id: i64, parts: &[&str]) {
+        let is_solve = parts.iter().any(|&p| {
+            let low = p.to_lowercase();
+            low == "solve" || low == "реши" || low == "пройди" || low == "сдай"
+        });
+        let should_submit = parts.iter().any(|&p| {
+            let low = p.to_lowercase();
+            low == "--submit" || low == "submit" || low == "сдать" || low == "отправить"
+        });
+
+        let explicit_id = parts.iter().skip(1).find_map(|&p| {
+            p.parse::<i64>().ok()
+        });
+
+        if is_solve || explicit_id.is_some() {
+            self.start_cdz_solve(chat_id, message_id, explicit_id, should_submit).await;
+            return;
+        }
+
+        let today = chrono::Local::now().date_naive();
+        let from_date = today - chrono::Duration::days(today.weekday().num_days_from_monday() as i64);
+        let to_date = today + chrono::Duration::days(14);
+
+        let _ = self.tg.send_message_reply(chat_id, "Ищу назначенные ЦДЗ в расписании МЭШ...", Some(message_id)).await;
+        match self.mesh.fetch_cdz_assignments(from_date, to_date).await {
+            Ok(assignments) if assignments.is_empty() => {
+                let _ = self.tg.send_message(chat_id, "На текущий период цифровых домашних заданий (ЦДЗ) не найдено.").await;
+            }
+            Ok(assignments) => {
+                let mut msg = String::from("Найдено цифровых домашних заданий (ЦДЗ):\n\n");
+                let mut keyboard_rows = Vec::new();
+
+                for (i, a) in assignments.iter().enumerate() {
+                    let status_str = if a.is_done { "выполнено" } else { "не выполнено" };
+                    let mat_title = if !a.material_title.is_empty() {
+                        format!("Материал: {}\n", a.material_title)
+                    } else {
+                        String::new()
+                    };
+                    msg.push_str(&format!(
+                        "{}. {}\nЗадание: {}\n{}Дата: {}\nСтатус: {}\nID: {}\n\n",
+                        i + 1,
+                        a.subject_name,
+                        a.description,
+                        mat_title,
+                        a.date,
+                        status_str,
+                        a.homework_entry_id
+                    ));
+
+                    if !a.is_done {
+                        keyboard_rows.push(vec![
+                            serde_json::json!({
+                                "text": format!("Решить #{} (HTML)", a.homework_entry_id),
+                                "callback_data": format!("cdz:solve:{}", a.homework_entry_id)
+                            }),
+                            serde_json::json!({
+                                "text": format!("Сдать #{} в МЭШ", a.homework_entry_id),
+                                "callback_data": format!("cdz:submit:{}", a.homework_entry_id)
+                            }),
+                        ]);
+                    }
+                }
+
+                keyboard_rows.push(vec![
+                    serde_json::json!({
+                        "text": "Обновить список ЦДЗ",
+                        "callback_data": "cdz:refresh"
+                    })
+                ]);
+
+                let markup = serde_json::json!({ "inline_keyboard": keyboard_rows });
+                let _ = self.tg.send_message_with_keyboard(chat_id, &msg, Some(markup), Some(message_id)).await;
+            }
+            Err(e) => {
+                let _ = self.tg.send_message(chat_id, &format!("Ошибка при поиске ЦДЗ: {}", e)).await;
+            }
+        }
+    }
+
+    async fn start_cdz_solve(
+        &self,
+        chat_id: &str,
+        message_id: i64,
+        explicit_id: Option<i64>,
+        should_submit: bool,
+    ) {
+        let _ = self.tg.set_message_reaction(chat_id, message_id, Some("👀")).await;
+
+        let today = chrono::Local::now().date_naive();
+        let from_date = today - chrono::Duration::days(today.weekday().num_days_from_monday() as i64);
+        let to_date = today + chrono::Duration::days(14);
+
+        let assignments = match self.mesh.fetch_cdz_assignments(from_date, to_date).await {
+            Ok(a) => a,
+            Err(e) => {
+                let _ = self.tg.send_message(chat_id, &format!("Не удалось получить список ЦДЗ: {}", e)).await;
+                let _ = self.tg.set_message_reaction(chat_id, message_id, None).await;
+                return;
+            }
+        };
+
+        let target_assignment = if let Some(target_id) = explicit_id {
+            assignments.into_iter().find(|a| a.homework_entry_id == target_id)
+        } else {
+            assignments.iter().find(|a| !a.is_done).cloned().or_else(|| assignments.into_iter().next())
+        };
+
+        let target = match target_assignment {
+            Some(t) => t,
+            None => {
+                let _ = self.tg.send_message(chat_id, "Не найдено подходящее ЦДЗ для решения. Проверьте список через /cdz.").await;
+                let _ = self.tg.set_message_reaction(chat_id, message_id, None).await;
+                return;
+            }
+        };
+
+        let mode_text = if should_submit { "с автосдачей в МЭШ" } else { "черновик в интерактивный HTML" };
+        let _ = self.tg.send_message(
+            chat_id,
+            &format!("Запускаю решение ЦДЗ #{} по предмету '{}' (режим: {})...", target.homework_entry_id, target.subject_name, mode_text)
+        ).await;
+
+        let tg_cl = self.tg.clone();
+        let mesh_cl = self.mesh.clone();
+        let solver_cl = self.solver.clone();
+        let db_cl = self.db.clone();
+        let cid = chat_id.to_string();
+
+        tokio::spawn(async move {
+            let cookies_json = db_cl.get_setting("mesh_cookies_json")
+                .ok()
+                .flatten()
+                .unwrap_or_default();
+
+            let token = mesh_cl.get_token().await;
+            let student_id = mesh_cl.student_id();
+
+            let cdz_client = match CdzClient::new(&cookies_json, &token, student_id) {
+                Ok(c) => c,
+                Err(e) => {
+                    let _ = tg_cl.send_message(&cid, &format!("Ошибка инициализации клиента ЦДЗ: {}", e)).await;
+                    let _ = tg_cl.set_message_reaction(&cid, message_id, None).await;
+                    return;
+                }
+            };
+
+            let launch_params = match cdz_client.resolve_launcher_params(target.homework_entry_id, &target.material_uuid).await {
+                Ok(p) => p,
+                Err(e) => {
+                    let _ = tg_cl.send_message(&cid, &format!("Ошибка получения xAPI параметров теста: {}", e)).await;
+                    let _ = tg_cl.set_message_reaction(&cid, message_id, None).await;
+                    return;
+                }
+            };
+
+            let session = match cdz_client.authenticate_library().await {
+                Ok(s) => s,
+                Err(e) => {
+                    let _ = tg_cl.send_message(&cid, &format!("Ошибка авторизации библиотеки uchebnik.mos.ru: {}", e)).await;
+                    let _ = tg_cl.set_message_reaction(&cid, message_id, None).await;
+                    return;
+                }
+            };
+
+            let attempt = match cdz_client.start_attempt(&session, &launch_params).await {
+                Ok(a) => a,
+                Err(e) => {
+                    let _ = tg_cl.send_message(&cid, &format!("Ошибка запуска попытки тестирования: {}", e)).await;
+                    let _ = tg_cl.set_message_reaction(&cid, message_id, None).await;
+                    return;
+                }
+            };
+
+            let all_tasks: Vec<_> = attempt.test_groups.iter().flat_map(|g| g.challenge_tasks.clone()).collect();
+            let total_tasks = all_tasks.len();
+            let progress_msg = tg_cl.send_message(
+                &cid,
+                &format!("Запуск решения ЦДЗ: попытка #{}.\nВсего заданий: {}.\nПодготовка первого задания...", attempt.challenge_attempt_id, total_tasks)
+            ).await.ok();
+
+            let mut solved_count = 0;
+            let mut export_tasks: Vec<crate::solver::CdzExportTask> = Vec::with_capacity(total_tasks);
+
+            for (idx, task) in all_tasks.iter().enumerate() {
+                let task_num = idx + 1;
+                if let Some(ref p_msg) = progress_msg {
+                    let _ = tg_cl.edit_message_text(
+                        &cid,
+                        *p_msg,
+                        &format!("Решаю ЦДЗ: задание {} из {}...\nПредмет: {}\n(Глубокий анализ рассуждений модели)", task_num, total_tasks, target.subject_name)
+                    ).await;
+                }
+
+                match CdzSolver::solve_task(&solver_cl, task, &target.subject_name, task_num, total_tasks).await {
+                    Ok(solved) => {
+                        solved_count += 1;
+                        export_tasks.push(crate::solver::CdzExportTask {
+                            task_num,
+                            task_id: task.id,
+                            task_type_label: solved.task_type_label.clone(),
+                            question_text: solved.question_text.clone(),
+                            answer_summary: solved.answer_summary.clone(),
+                            solution_text: solved.solution_text.clone(),
+                            explanation: solved.explanation.clone(),
+                        });
+
+                        if should_submit {
+                            if let Err(e) = cdz_client.submit_task_answer(&session, task.id, attempt.challenge_attempt_id, solved.payload).await {
+                                warn!("Ошибка отправки ответа на задачу #{}: {}", task_num, e);
+                            }
+                        }
+                    }
+                    Err(e) => {
+                        warn!("Ошибка решения задания #{}/{}: {}", task_num, total_tasks, e);
+                        let q_fallback = task.question_elements.iter()
+                            .filter_map(|q| q.text.as_ref())
+                            .cloned()
+                            .collect::<Vec<_>>()
+                            .join("\n\n");
+
+                        export_tasks.push(crate::solver::CdzExportTask {
+                            task_num,
+                            task_id: task.id,
+                            task_type_label: CdzSolver::get_task_type_label(&task.answer.answer_type),
+                            question_text: if q_fallback.is_empty() { "Текст задания в медиа-формате".to_string() } else { q_fallback },
+                            answer_summary: "Решение не сформировано (ошибка)".to_string(),
+                            solution_text: format!("Ошибка при генерации решения: {}", e),
+                            explanation: "При вызове модели произошел сбой или превышен таймаут.".to_string(),
+                        });
+                    }
+                }
+            }
+
+            // Упаковываем все решения в интерактивный HTML отчет
+            let status_badge = if should_submit { "Сдано в МЭШ" } else { "Черновик (без сдачи)" };
+            let html_content = crate::solver::CdzHtmlExporter::render_html(
+                &target.subject_name,
+                &target.material_title,
+                target.homework_entry_id,
+                &target.date,
+                status_badge,
+                should_submit,
+                &export_tasks,
+            );
+
+            let export_dir = std::path::PathBuf::from("exports");
+            match crate::solver::CdzHtmlExporter::save_export_file(&export_dir, &target.subject_name, target.homework_entry_id, &html_content) {
+                Ok(file_path) => {
+                    let caption = format!(
+                        "Отчет ЦДЗ: {} ({} заданий)\nID: {}\nСтатус: {}",
+                        target.subject_name, total_tasks, target.homework_entry_id, status_badge
+                    );
+                    let reply_markup = if !should_submit {
+                        Some(serde_json::json!({
+                            "inline_keyboard": [
+                                [
+                                    {
+                                        "text": format!("Сдать тест #{} в МЭШ", target.homework_entry_id),
+                                        "callback_data": format!("cdz:submit:{}", target.homework_entry_id)
+                                    }
+                                ]
+                            ]
+                        }))
+                    } else {
+                        None
+                    };
+
+                    if let Err(e) = tg_cl.send_document_with_keyboard(&cid, &file_path, Some(&caption), reply_markup).await {
+                        let _ = tg_cl.send_message(&cid, &format!("Ошибка отправки HTML документа: {}", e)).await;
+                    }
+                }
+                Err(e) => {
+                    let _ = tg_cl.send_message(&cid, &format!("Ошибка при сохранении HTML отчета: {}", e)).await;
+                }
+            }
+
+            if should_submit {
+                let _ = tg_cl.send_message(&cid, "Все ответы отправлены. Завершаю попытку на сервере МЭШ...").await;
+                if let Err(e) = cdz_client.complete_attempt(&session, &attempt.challenge_id).await {
+                    let _ = tg_cl.send_message(&cid, &format!("Ошибка при завершении попытки: {}", e)).await;
+                } else {
+                    match cdz_client.fetch_result(&session, &attempt.challenge_id, attempt.challenge_attempt_id).await {
+                        Ok(res) => {
+                            let score_str = match (res.score, res.max_score) {
+                                (Some(s), Some(m)) => format!("Баллы: {} из {}", s, m),
+                                _ => "Оценка сформирована".to_string(),
+                            };
+                            let pct_str = res.percent_complete.map_or(String::new(), |p| format!(" ({}%)", p));
+                            let _ = tg_cl.send_message(&cid, &format!("Тест успешно сдан.\n{}{}", score_str, pct_str)).await;
+                        }
+                        Err(e) => {
+                            let _ = tg_cl.send_message(&cid, &format!("Попытка завершена, но не удалось получить протокол результатов: {}", e)).await;
+                        }
+                    }
+                }
+            } else {
+                let _ = tg_cl.send_message(
+                    &cid,
+                    &format!("Решение завершено (решено {} из {} заданий). Результаты упакованы в HTML выше. Чтобы отправить ответы и сдать тест, нажмите кнопку под файлом выше либо отправьте /cdz solve {} --submit", solved_count, total_tasks, target.homework_entry_id)
+                ).await;
+            }
+
+            if let Some(ref p_msg) = progress_msg {
+                let _ = tg_cl.edit_message_text(
+                    &cid,
+                    *p_msg,
+                    &format!("Решение ЦДЗ завершено ({} из {} заданий). Интерактивный отчет прикреплен выше.", solved_count, total_tasks)
+                ).await;
+            }
+
+            let _ = tg_cl.set_message_reaction(&cid, message_id, Some("👍")).await;
+        });
+    }
+
     pub fn parse_duration_seconds(input: &str) -> Option<u64> {
+
         let lower = input.to_lowercase();
         if lower.contains("навсегда") || lower.contains("perm") || lower.contains("бессрочно") {
             return None;
         }
 
         let words: Vec<&str> = lower.split_whitespace().collect();
-        for i in 0..words.len() {
-            let w = words[i];
+        let mut total_secs: u64 = 0;
+        let mut found_any = false;
+
+        let mut i = 0;
+        while i < words.len() {
+            let mut w = words[i];
+
+            // Снимаем префикс команды (например "!мут10м" -> "10м", "/бан2ч" -> "2ч")
+            for prefix in &[
+                "!мут", "/мут", "!mute", "/mute",
+                "!бан", "/бан", "!ban", "/ban",
+                "!размут", "/размут", "!unmute", "/unmute",
+            ] {
+                if let Some(rest) = w.strip_prefix(prefix) {
+                    w = rest;
+                    break;
+                }
+            }
+
+            if w.is_empty() {
+                i += 1;
+                continue;
+            }
+
+            // 1. Формат "10м", "2ч", "1д", "30с", "15min", "2h", "1day"
             if let Some(pos) = w.find(|c: char| !c.is_ascii_digit()) {
                 if pos > 0 {
                     let num_part = &w[..pos];
                     let unit_part = &w[pos..];
                     if let Ok(num) = num_part.parse::<u64>() {
-                        if unit_part.starts_with('м') || unit_part.starts_with('m') {
-                            return Some(num * 60);
-                        } else if unit_part.starts_with('ч') || unit_part.starts_with('h') {
-                            return Some(num * 3600);
-                        } else if unit_part.starts_with('д') || unit_part.starts_with('d') {
-                            return Some(num * 86400);
-                        } else if unit_part.starts_with('с') || unit_part.starts_with('s') {
-                            return Some(num);
+                        if unit_part.starts_with("мин") || unit_part.starts_with("min") || unit_part.starts_with('м') || unit_part.starts_with('m') {
+                            total_secs += num * 60;
+                            found_any = true;
+                            i += 1;
+                            continue;
+                        } else if unit_part.starts_with("час") || unit_part.starts_with("hour") || unit_part.starts_with('ч') || unit_part.starts_with('h') {
+                            total_secs += num * 3600;
+                            found_any = true;
+                            i += 1;
+                            continue;
+                        } else if unit_part.starts_with("ден") || unit_part.starts_with("дн") || unit_part.starts_with("day") || unit_part.starts_with('д') || unit_part.starts_with('d') {
+                            total_secs += num * 86400;
+                            found_any = true;
+                            i += 1;
+                            continue;
+                        } else if unit_part.starts_with("сек") || unit_part.starts_with("sec") || unit_part.starts_with('с') || unit_part.starts_with('s') {
+                            total_secs += num;
+                            found_any = true;
+                            i += 1;
+                            continue;
                         }
                     }
                 }
             }
 
+            // 2. Формат "10 минут", "2 часа", "1 день", "30 секунд" или отдельное число
             if let Ok(num) = w.parse::<u64>() {
                 if i + 1 < words.len() {
                     let next = words[i + 1];
                     if next.starts_with("мин") || next.starts_with("min") || next.starts_with('м') || next.starts_with('m') {
-                        return Some(num * 60);
+                        total_secs += num * 60;
+                        found_any = true;
+                        i += 2;
+                        continue;
                     } else if next.starts_with("час") || next.starts_with("hour") || next.starts_with('ч') || next.starts_with('h') {
-                        return Some(num * 3600);
+                        total_secs += num * 3600;
+                        found_any = true;
+                        i += 2;
+                        continue;
                     } else if next.starts_with("ден") || next.starts_with("дн") || next.starts_with("day") || next.starts_with('д') || next.starts_with('d') {
-                        return Some(num * 86400);
+                        total_secs += num * 86400;
+                        found_any = true;
+                        i += 2;
+                        continue;
                     } else if next.starts_with("сек") || next.starts_with("sec") || next.starts_with('с') || next.starts_with('s') {
-                        return Some(num);
+                        total_secs += num;
+                        found_any = true;
+                        i += 2;
+                        continue;
                     }
-                } else if num <= 10_000 {
-                    return Some(num * 60);
+                }
+
+                // Число без единиц измерения (например, "!мут 15" или "!мут15"):
+                // Считаем минутами, только если это разумное число (<= 10000) и еще не было других распознанных единиц
+                if !found_any && num <= 10_000 {
+                    total_secs += num * 60;
+                    found_any = true;
+                    i += 1;
+                    continue;
                 }
             }
+
+            i += 1;
         }
 
-        None
+        if found_any && total_secs > 0 {
+            Some(total_secs)
+        } else {
+            None
+        }
     }
 
     pub fn format_duration_human(secs: u64) -> String {
@@ -1071,8 +1590,12 @@ impl BotHandler {
         // Загружаем привязку участников группы и карту титулов
         let (roster_context, title_map) = self.build_group_roster_context(chat_id).await;
 
-        // Загружаем недавний контекст истории диалога (40 последних сообщений для мгновенного ответа)
-        let chat_history = self.db.get_chat_history(chat_id, 40, 30_000).unwrap_or_default();
+        // Загружаем недавний контекст истории диалога (40 последних сообщений с момента последней очистки)
+        let clear_ts = self.db.get_setting(&format!("chat_clear_ts_{}", chat_id))
+            .ok()
+            .flatten()
+            .and_then(|s| s.parse::<i64>().ok());
+        let chat_history = self.db.get_chat_history_since(chat_id, 40, 30_000, clear_ts).unwrap_or_default();
         let mut chat_history_context = String::new();
         if !chat_history.is_empty() {
             chat_history_context.push_str("ИСТОРИЯ ПЕРЕПИСКИ В ЧАТЕ (недавний контекст диалога):\n");
@@ -1162,14 +1685,21 @@ impl BotHandler {
              8. Учитывай контекст предыдущего диалога: помни, о чем шла речь ранее в переписке, не начинай каждый раз с чистого листа.\n\
              9. Если спрашивают про дни недели или даты — сопоставь с текущей датой ({}) и расписанием МЭШ.\n\
              10. Используй список участников и их приписки: понимай, к кому обращаются по имени (Имран, Игорь, Асыл, Варя, Семён, Демир, Тимофей, Алина и др.).\n\
-             11. СТРОГИЙ РЕЖИМ РАБОТЫ И ИНСТРУМЕНТЫ:\n\
-                 - КАТЕГОРИЧЕСКИ ЗАПРЕЩЕНО вызывать любые консольные инструменты, bash, run_command, git, ls, grep или читать файлы проекта для обычных вопросов! На любые обычные сообщения, общение, шутки, мемы, школьные вопросы, приветствия и реакцию на фото — ТЫ ОБЯЗАН СРАЗУ ВЫДАТЬ ПРЯМОЙ ЛАКОНИЧНЫЙ ТЕКСТ ОТВЕТА БЕЗ ЕДИНОГО ТУЛА!\n\
-                 - Использовать терминал и Python разрешено ИСКЛЮЧИТЕЛЬНО для глубоких аналитических запросов ('топ сообщений', 'статистика', 'облако слов', 'график', 'sql'):\n\
-                   • `python3 scripts/bot_api.py top 20` (выводит красивый рейтинг участников по сообщениям)\n\
-                   • `python3 scripts/bot_api.py stats` (общая статистика чата)\n\
-                   • `python3 scripts/bot_api.py sync` (скачивает свежую историю переписки через Telethon)\n\
-                   • `python3 scripts/generate_swear_visuals.py --send` (строит график и облако слов ненормативной лексики по всей базе и отправляет в чат)\n\
-                   • `python3 scripts/bot_api.py sql \"SELECT ...\"` (прямые SQL-запросы к chat_messages).\n\
+             11. ДОСТУП К БАЗЕ ДАННЫХ И РЕЖИМ РАБОТЫ С ИНСТРУМЕНТАМИ:\n\
+                 - База данных SQLite доступна локально: путь `$DB_PATH` (по умолчанию data/homeworks.db).\n\
+                 - Структура таблиц базы данных:\n\
+                   • `chat_messages` (более 10 000 сообщений класса 7В): колонки (id INTEGER PRIMARY KEY, chat_id TEXT, message_id INTEGER, user_id INTEGER, username TEXT, full_name TEXT, text TEXT, reply_to_message_id INTEGER, reply_to_user_id INTEGER, ai_query TEXT, timestamp INTEGER unix epoch).\n\
+                   • `seen_users`: колонки (user_id INTEGER PRIMARY KEY, username TEXT, first_name TEXT, last_name TEXT, custom_title TEXT, first_seen INTEGER, last_seen INTEGER).\n\
+                   • `processed_homeworks`: история и статусы выполненных решений домашних заданий.\n\
+                 - На любые обычные сообщения, общение, шутки, школьные вопросы, уроки, приветствия — ОТВЕЧАЙ СРАЗУ И ЛАКОНИЧНО БЕЗ ВЫЗОВА КОНСОЛИ И ТУЛОВ!\n\
+                 - Если запрос требует поиска по истории чата, воспоминания кто и когда что говорил, поиска цитат, анализа конфликтов/споров, статистики или топов — ОБЯЗАТЕЛЬНО используй CLI-инструменты работы с базой:\n\
+                   • `python3 scripts/bot_api.py search \"<текст>\" [--user <имя_или_id>] [--limit 25]` — быстрый поиск сообщений в архиве чата по тексту и автору.\n\
+                   • `python3 scripts/bot_api.py user_history <имя_или_id> [--limit 30]` — последние сообщения конкретного участника.\n\
+                   • `python3 scripts/bot_api.py top 20 [--days 7]` — красивый рейтинг участников по числу сообщений.\n\
+                   • `python3 scripts/bot_api.py stats` — общая статистика переписки чата.\n\
+                   • `python3 scripts/bot_api.py sql \"SELECT ...\"` — прямой SQL запрос к базе данных (возвращает JSON результат).\n\
+                   • `python3 scripts/bot_api.py sync` — синхронизация свежей переписки через MTProto.\n\
+                   • `python3 scripts/generate_swear_visuals.py --send` — построение графиков и облака мата.\n\
                  - Переменные окружения: `$TELEGRAM_BOT_TOKEN`, `$TELEGRAM_CHAT_ID`, `$DB_PATH`.\n\
              12. РАБОТА С ИЗОБРАЖЕНИЯМИ:\n\
                  - Если в вопросе пользователя есть строка `*прикреплено: /путь/к/файлу.jpg*`, значит к запросу прикреплена картинка. Файл доступен на диске сервера: ты можешь проанализировать его, использовать скрипты на Python (например, PIL/tesseract) или консольные утилиты.\n\
@@ -1204,7 +1734,10 @@ impl BotHandler {
                 }
             });
 
-            let res = solver.ask_chat(&prompt, target_model, Some(&chat_id_str)).await;
+            let conv_setting_key = format!("agy_conv_id_{}", chat_id_str);
+            let active_conv_id = db_cl.get_setting(&conv_setting_key).ok().flatten();
+
+            let res = solver.ask_chat(&prompt, target_model, Some(&chat_id_str), active_conv_id.as_deref()).await;
             typing_task.abort();
 
             // Удаляем временный файл входящего фото после ответа модели
@@ -1213,7 +1746,12 @@ impl BotHandler {
             }
 
             match res {
-                Ok(reply) => {
+                Ok((reply, new_conv_id_opt)) => {
+                    if let Some(new_cid) = new_conv_id_opt {
+                        if active_conv_id.as_deref() != Some(&new_cid) {
+                            let _ = db_cl.set_setting(&conv_setting_key, &new_cid);
+                        }
+                    }
                     let (action_opt, raw_clean_reply) = ModerationManager::extract_action(&reply);
                     let (clean_reply, outgoing_photo_opt) = {
                         let (cleaned, direct_photo) = extract_attached_photo(&raw_clean_reply);
@@ -1415,6 +1953,23 @@ pub fn is_dispute_query(query: &str) -> bool {
         || lower.contains("что произошло в чате")
         || lower.contains("из-за чего спорили")
         || lower.contains("из за чего спор")
+}
+
+pub fn is_clear_command(text: &str) -> bool {
+    let t = text.trim();
+    let low = t.to_lowercase();
+    let first = low.split_whitespace().next().unwrap_or("");
+    matches!(
+        first,
+        "!/clear"
+            | "!clear"
+            | "/clear"
+            | "/clear@ew1484_bot"
+            | "!/reset"
+            | "!reset"
+            | "/reset"
+            | "/reset@ew1484_bot"
+    )
 }
 
 pub fn parse_target_day_input(input: &str, today: chrono::NaiveDate) -> (TargetDay, String) {
@@ -1729,6 +2284,14 @@ mod tests {
         assert_eq!(BotHandler::parse_duration_seconds("15 мин"), Some(900));
         assert_eq!(BotHandler::parse_duration_seconds("15m"), Some(900));
         assert_eq!(BotHandler::parse_duration_seconds("15м"), Some(900));
+        assert_eq!(BotHandler::parse_duration_seconds("!мут10м"), Some(600));
+        assert_eq!(BotHandler::parse_duration_seconds("!мут15м"), Some(900));
+        assert_eq!(BotHandler::parse_duration_seconds("!бан30м"), Some(1800));
+        assert_eq!(BotHandler::parse_duration_seconds("/mute2h"), Some(7200));
+        assert_eq!(BotHandler::parse_duration_seconds("!мут15"), Some(900));
+        assert_eq!(BotHandler::parse_duration_seconds("!мут 1ч 30м"), Some(5400));
+        assert_eq!(BotHandler::parse_duration_seconds("1 час 30 минут"), Some(5400));
+        assert_eq!(BotHandler::parse_duration_seconds("2 дня 5 часов"), Some(172800 + 18000));
         assert_eq!(BotHandler::parse_duration_seconds("2 часа"), Some(7200));
         assert_eq!(BotHandler::parse_duration_seconds("2ч"), Some(7200));
         assert_eq!(BotHandler::parse_duration_seconds("2h"), Some(7200));
@@ -1811,6 +2374,21 @@ mod tests {
         let (text3, photo3) = extract_attached_photo("Обычный ответ без картинки");
         assert_eq!(photo3, None);
         assert_eq!(text3, "Обычный ответ без картинки");
+    }
+
+    #[test]
+    fn test_is_clear_command() {
+        assert!(is_clear_command("!/clear"));
+        assert!(is_clear_command("!clear"));
+        assert!(is_clear_command("/clear"));
+        assert!(is_clear_command("/clear@ew1484_bot"));
+        assert!(is_clear_command("!/reset"));
+        assert!(is_clear_command("!reset"));
+        assert!(is_clear_command("/reset"));
+        assert!(is_clear_command("!/clear пожалуйста"));
+        assert!(!is_clear_command("!привет"));
+        assert!(!is_clear_command("!дз"));
+        assert!(!is_clear_command("просто текст"));
     }
 }
 

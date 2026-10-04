@@ -16,3 +16,4 @@ tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 anyhow = "1.0"
 dotenvy = "0.15"
 tokio-util = "0.7"
+regex = "1.10"

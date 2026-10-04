@@ -194,6 +194,155 @@ def get_chat_stats(chat_id: str = None) -> dict:
         "peak_count": peak_count
     }
 
+def search_messages(query: str, chat_id: str = None, user: str = None, limit: int = 25) -> list:
+    """Поиск сообщений по подстроке текста и/или пользователю."""
+    conn = get_db_connection()
+    c = conn.cursor()
+    conditions = ["m.text LIKE ?"]
+    params = [f"%{query}%"]
+    
+    if chat_id:
+        conditions.append("m.chat_id = ?")
+        params.append(str(chat_id))
+    if user:
+        clean_user = user.lstrip("@").lower()
+        conditions.append("(LOWER(m.username) = ? OR LOWER(m.full_name) LIKE ? OR m.user_id = ?)")
+        params.extend([clean_user, f"%{clean_user}%", int(clean_user) if clean_user.isdigit() else 0])
+        
+    where = "WHERE " + " AND ".join(conditions)
+    sql = f"""
+        SELECT m.id, m.message_id, m.user_id, COALESCE(u.custom_title, '') as custom_title,
+               m.username, m.full_name, m.text, m.reply_to_message_id, m.timestamp,
+               datetime(m.timestamp, 'unixepoch', 'localtime') as dt
+        FROM chat_messages m
+        LEFT JOIN seen_users u ON m.user_id = u.user_id
+        {where}
+        ORDER BY m.timestamp DESC
+        LIMIT ?
+    """
+    params.append(limit)
+    try:
+        c.execute(sql, params)
+        rows = [dict(r) for r in c.fetchall()]
+    except Exception as e:
+        rows = [{"error": str(e)}]
+    conn.close()
+    return rows
+
+def get_user_history(user: str, chat_id: str = None, limit: int = 30) -> list:
+    """Получает последние сообщения указанного участника."""
+    conn = get_db_connection()
+    c = conn.cursor()
+    clean_user = user.lstrip("@").lower()
+    conditions = ["(LOWER(m.username) = ? OR LOWER(m.full_name) LIKE ? OR m.user_id = ?)"]
+    params = [clean_user, f"%{clean_user}%", int(clean_user) if clean_user.isdigit() else 0]
+    
+    if chat_id:
+        conditions.append("m.chat_id = ?")
+        params.append(str(chat_id))
+        
+    where = "WHERE " + " AND ".join(conditions)
+    sql = f"""
+        SELECT m.id, m.message_id, m.user_id, COALESCE(u.custom_title, '') as custom_title,
+               m.username, m.full_name, m.text, m.reply_to_message_id, m.timestamp,
+               datetime(m.timestamp, 'unixepoch', 'localtime') as dt
+        FROM chat_messages m
+        LEFT JOIN seen_users u ON m.user_id = u.user_id
+        {where}
+        ORDER BY m.timestamp DESC
+        LIMIT ?
+    """
+    params.append(limit)
+    try:
+        c.execute(sql, params)
+        rows = [dict(r) for r in c.fetchall()]
+    except Exception as e:
+        rows = [{"error": str(e)}]
+    conn.close()
+    return rows
+
+def import_export_json(json_path: str, chat_id: str = "-1004469624876") -> int:
+    """Импортирует историю сообщений из result.json Telegram Desktop / AyuGram в chat_messages."""
+    p = Path(json_path)
+    if not p.exists():
+        raise FileNotFoundError(f"Файл {json_path} не найден")
+    with open(p, "r", encoding="utf-8") as f:
+        data = json.load(f)
+        
+    msgs = data.get("messages", [])
+    conn = get_db_connection()
+    c = conn.cursor()
+    
+    inserted = 0
+    now_str = datetime.utcnow().strftime("%Y-%m-%d %H:%M:%S")
+    for m in msgs:
+        if m.get("type") != "message":
+            continue
+        msg_id = m.get("id")
+        if not msg_id:
+            continue
+            
+        from_id_raw = m.get("from_id") or ""
+        if from_id_raw.startswith("user"):
+            user_id = int(from_id_raw.replace("user", ""))
+        elif from_id_raw.startswith("channel"):
+            user_id = int(from_id_raw.replace("channel", ""))
+        elif str(from_id_raw).isdigit():
+            user_id = int(from_id_raw)
+        else:
+            user_id = 0
+            
+        full_name = m.get("from") or "Пользователь"
+        username = None
+        
+        txt_val = m.get("text")
+        if isinstance(txt_val, list):
+            parts = []
+            for part in txt_val:
+                if isinstance(part, str):
+                    parts.append(part)
+                elif isinstance(part, dict):
+                    parts.append(part.get("text", ""))
+            text = "".join(parts).strip()
+        elif isinstance(txt_val, str):
+            text = txt_val.strip()
+        else:
+            text = ""
+            
+        if not text:
+            if m.get("photo"):
+                text = "[Фото]"
+            elif m.get("media_type") == "sticker":
+                text = "[Стикер]"
+            elif m.get("media_type") == "video_file":
+                text = "[Видео]"
+            elif m.get("media_type") == "voice_message":
+                text = "[Голосовое сообщение]"
+            elif m.get("media_type") == "audio_file":
+                text = "[Аудио]"
+            else:
+                text = "[Медиа]"
+                
+        reply_to_id = m.get("reply_to_message_id")
+        timestamp = int(m.get("date_unixtime") or 0)
+        created_at = m.get("date") or now_str
+        
+        try:
+            c.execute("""
+                INSERT OR IGNORE INTO chat_messages (
+                    chat_id, message_id, user_id, username, full_name, text,
+                    reply_to_message_id, timestamp, created_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """, (chat_id, msg_id, user_id, username, full_name, text, reply_to_id, timestamp, created_at))
+            if c.rowcount > 0:
+                inserted += 1
+        except Exception:
+            pass
+            
+    conn.commit()
+    conn.close()
+    return inserted
+
 def execute_sql(query: str, params: list = None) -> list:
     """Выполняет произвольный SQL-запрос на чтение из БД."""
     conn = get_db_connection()
@@ -322,6 +471,26 @@ def main():
     photo_p.add_argument("--chat-id", type=str, default=None)
     photo_p.add_argument("--reply-to", type=int, default=None)
 
+    # search
+    search_p = subparsers.add_parser("search", help="Поиск сообщений по тексту и/или пользователю")
+    search_p.add_argument("query", type=str, help="Текст для поиска")
+    search_p.add_argument("--user", type=str, default=None, help="Имя, юзернейм или ID участника")
+    search_p.add_argument("--chat-id", type=str, default=None)
+    search_p.add_argument("--limit", type=int, default=25)
+    search_p.add_argument("--json", action="store_true")
+
+    # user_history
+    uh_p = subparsers.add_parser("user_history", help="История сообщений пользователя")
+    uh_p.add_argument("user", type=str, help="Имя, @username или ID участника")
+    uh_p.add_argument("--chat-id", type=str, default=None)
+    uh_p.add_argument("--limit", type=int, default=30)
+    uh_p.add_argument("--json", action="store_true")
+
+    # import_json
+    imp_p = subparsers.add_parser("import_json", help="Импорт сообщений из result.json Telegram")
+    imp_p.add_argument("path", type=str, help="Путь к файлу result.json")
+    imp_p.add_argument("--chat-id", type=str, default="-1004469624876")
+
     # sync
     sync_p = subparsers.add_parser("sync", help="Синхронизировать переписку через Telethon MTProto")
     sync_p.add_argument("--chat-id", type=int, default=-1004469624876)
@@ -330,7 +499,37 @@ def main():
 
     args = parser.parse_args()
 
-    if args.command == "sync":
+    if args.command == "search":
+        res = search_messages(args.query, chat_id=args.chat_id, user=args.user, limit=args.limit)
+        if args.json:
+            print(json.dumps(res, ensure_ascii=False, indent=2))
+        else:
+            if not res:
+                print(f"По запросу '{args.query}' ничего не найдено.")
+            else:
+                print(f"Найдено {len(res)} сообщений:")
+                for r in res:
+                    title_hint = f" [{r['custom_title']}]" if r.get('custom_title') else ""
+                    un = f" (@{r['username']})" if r.get('username') else ""
+                    print(f"[{r.get('dt', '')}] {r.get('full_name')}{title_hint}{un} (msg_id: {r.get('message_id')}): {r.get('text')}")
+
+    elif args.command == "user_history":
+        res = get_user_history(args.user, chat_id=args.chat_id, limit=args.limit)
+        if args.json:
+            print(json.dumps(res, ensure_ascii=False, indent=2))
+        else:
+            if not res:
+                print(f"Сообщений от пользователя {args.user} не найдено.")
+            else:
+                print(f"Последние сообщения ({len(res)} шт.):")
+                for r in res:
+                    print(f"[{r.get('dt', '')}] {r.get('full_name')}: {r.get('text')}")
+
+    elif args.command == "import_json":
+        cnt = import_export_json(args.path, chat_id=args.chat_id)
+        print(f"Успешно импортировано новых сообщений: {cnt}")
+
+    elif args.command == "sync":
         import asyncio
         import sys
         sys.path.insert(0, str(Path(__file__).parent.parent))

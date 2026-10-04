@@ -1,0 +1,460 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=5.0, user-scalable=yes">
+  <title>ЦДЗ — {{subject_name}} ({{material_title}})</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Nunito:wght@400;500;600;700;800&family=JetBrains+Mono:wght@400;500;600;700&display=swap" rel="stylesheet">
+  <style>
+    :root {
+      --bg: #121215;
+      --card-bg: #1a1a20;
+      --card-hover: #212129;
+      --border: #2a2a35;
+      --border-focus: #424252;
+      --text: #ececf2;
+      --text-muted: #9c9cae;
+      --text-dim: #6c6c7e;
+      
+      --accent: #6366f1;
+      --accent-dim: rgba(99, 102, 241, 0.15);
+      
+      --answer-bg: #13231a;
+      --answer-border: #205c38;
+      --answer-text: #4ade80;
+      
+      --collapse-bg: #15151c;
+      --collapse-border: #272736;
+      --collapse-hover: #1c1c24;
+      
+      --code-bg: #151519;
+      --btn-bg: #22222c;
+      --btn-hover: #2c2c38;
+      --btn-active: #383848;
+    }
+
+    * {
+      box-sizing: border-box;
+      margin: 0;
+      padding: 0;
+      -webkit-tap-highlight-color: transparent;
+    }
+
+    body {
+      background-color: var(--bg);
+      color: var(--text);
+      font-family: 'Nunito', -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+      font-size: 15.5px;
+      line-height: 1.6;
+      padding: 20px 14px 56px;
+      max-width: 680px;
+      margin: 0 auto;
+      text-rendering: optimizeLegibility;
+      -webkit-font-smoothing: antialiased;
+    }
+
+    /* HEADER */
+    .header {
+      padding: 10px 4px 18px;
+      border-bottom: 1px solid var(--border);
+      margin-bottom: 16px;
+    }
+
+    .header-top {
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      margin-bottom: 6px;
+    }
+
+    .app-title {
+      font-size: 11px;
+      letter-spacing: 0.12em;
+      text-transform: uppercase;
+      font-weight: 700;
+      color: var(--text-dim);
+      font-family: 'JetBrains Mono', ui-monospace, monospace;
+    }
+
+    .header-counter {
+      font-size: 11px;
+      letter-spacing: 0.08em;
+      text-transform: uppercase;
+      font-weight: 700;
+      color: var(--text-muted);
+      font-family: 'JetBrains Mono', ui-monospace, monospace;
+      background: var(--card-bg);
+      padding: 3px 8px;
+      border-radius: 4px;
+      border: 1px solid var(--border);
+    }
+
+    .header-subject {
+      font-size: 22px;
+      font-weight: 800;
+      letter-spacing: -0.02em;
+      color: var(--text);
+      margin-bottom: 4px;
+    }
+
+    .header-material {
+      font-size: 15px;
+      font-weight: 600;
+      color: var(--text-muted);
+      margin-bottom: 10px;
+    }
+
+    .meta-bar {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 8px;
+      font-size: 12px;
+      color: var(--text-dim);
+      font-family: 'JetBrains Mono', ui-monospace, monospace;
+      align-items: center;
+    }
+
+    .badge-tag {
+      background: var(--card-bg);
+      border: 1px solid var(--border);
+      padding: 2px 8px;
+      border-radius: 4px;
+      color: var(--text-muted);
+    }
+
+    .badge-status {
+      background: var(--accent-dim);
+      border: 1px solid rgba(99, 102, 241, 0.35);
+      color: #a5b4fc;
+      padding: 2px 8px;
+      border-radius: 4px;
+      font-weight: 600;
+    }
+
+    .badge-status.submitted {
+      background: rgba(34, 197, 94, 0.15);
+      border-color: rgba(34, 197, 94, 0.35);
+      color: #86efac;
+    }
+
+    /* ACTION BAR */
+    .action-bar {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 8px;
+      margin-bottom: 18px;
+    }
+
+    .btn-tool {
+      background: var(--btn-bg);
+      color: var(--text-muted);
+      border: 1px solid var(--border);
+      padding: 6px 12px;
+      font-size: 12.5px;
+      font-weight: 600;
+      border-radius: 6px;
+      cursor: pointer;
+      display: inline-flex;
+      align-items: center;
+      gap: 6px;
+      transition: background 0.15s, color 0.15s;
+    }
+
+    .btn-tool:hover {
+      background: var(--btn-hover);
+      color: var(--text);
+    }
+
+    .btn-tool:active {
+      background: var(--btn-active);
+    }
+
+    .btn-tool svg {
+      width: 14px;
+      height: 14px;
+    }
+
+    /* TASK CARD */
+    .task-card {
+      background: var(--card-bg);
+      border: 1px solid var(--border);
+      border-radius: 10px;
+      padding: 16px;
+      margin-bottom: 16px;
+      box-shadow: 0 4px 14px rgba(0, 0, 0, 0.2);
+    }
+
+    .task-card-header {
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      margin-bottom: 12px;
+      padding-bottom: 8px;
+      border-bottom: 1px solid var(--border);
+    }
+
+    .task-title-group {
+      display: flex;
+      align-items: center;
+      gap: 8px;
+    }
+
+    .task-number {
+      font-size: 16px;
+      font-weight: 800;
+      color: var(--text);
+    }
+
+    .task-type-badge {
+      font-size: 11px;
+      font-family: 'JetBrains Mono', monospace;
+      background: var(--bg);
+      border: 1px solid var(--border);
+      color: var(--text-muted);
+      padding: 2px 6px;
+      border-radius: 4px;
+    }
+
+    .task-id-badge {
+      font-size: 11px;
+      font-family: 'JetBrains Mono', monospace;
+      color: var(--text-dim);
+    }
+
+    /* QUESTION BOX (ALWAYS VISIBLE) */
+    .question-box {
+      background: var(--bg);
+      border: 1px solid var(--border);
+      border-radius: 8px;
+      padding: 12px 14px;
+      margin-bottom: 12px;
+    }
+
+    .section-label {
+      font-size: 11px;
+      font-weight: 700;
+      letter-spacing: 0.08em;
+      text-transform: uppercase;
+      color: var(--text-dim);
+      font-family: 'JetBrains Mono', monospace;
+      margin-bottom: 6px;
+    }
+
+    .question-content {
+      font-size: 15px;
+      color: var(--text);
+      white-space: pre-wrap;
+      word-break: break-word;
+    }
+
+    /* ANSWER BOX (ALWAYS VISIBLE) */
+    .answer-box {
+      background: var(--answer-bg);
+      border: 1px solid var(--answer-border);
+      border-radius: 8px;
+      padding: 12px 14px;
+      margin-bottom: 14px;
+    }
+
+    .answer-header {
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      margin-bottom: 6px;
+    }
+
+    .answer-label {
+      font-size: 11.5px;
+      font-weight: 700;
+      letter-spacing: 0.08em;
+      text-transform: uppercase;
+      color: var(--answer-text);
+      font-family: 'JetBrains Mono', monospace;
+    }
+
+    .btn-copy-mini {
+      background: rgba(74, 222, 128, 0.12);
+      border: 1px solid rgba(74, 222, 128, 0.25);
+      color: var(--answer-text);
+      padding: 2px 8px;
+      font-size: 11px;
+      font-family: 'JetBrains Mono', monospace;
+      border-radius: 4px;
+      cursor: pointer;
+      transition: background 0.15s;
+    }
+
+    .btn-copy-mini:hover {
+      background: rgba(74, 222, 128, 0.22);
+    }
+
+    .answer-value {
+      font-size: 15.5px;
+      font-weight: 700;
+      color: #ffffff;
+      white-space: pre-wrap;
+      word-break: break-word;
+    }
+
+    /* COLLAPSIBLE DETAILS (SOLUTION & EXPLANATION) */
+    .cdz-detail-block {
+      background: var(--collapse-bg);
+      border: 1px solid var(--collapse-border);
+      border-radius: 8px;
+      margin-top: 8px;
+      overflow: hidden;
+      transition: border-color 0.15s;
+    }
+
+    .cdz-detail-block[open] {
+      border-color: var(--border-focus);
+    }
+
+    .cdz-detail-summary {
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      padding: 10px 14px;
+      font-size: 13.5px;
+      font-weight: 700;
+      color: var(--text-muted);
+      cursor: pointer;
+      user-select: none;
+      list-style: none;
+      transition: background 0.15s, color 0.15s;
+    }
+
+    .cdz-detail-summary::-webkit-details-marker {
+      display: none;
+    }
+
+    .cdz-detail-summary:hover {
+      background: var(--collapse-hover);
+      color: var(--text);
+    }
+
+    .summary-left {
+      display: flex;
+      align-items: center;
+      gap: 8px;
+    }
+
+    .summary-left svg {
+      width: 15px;
+      height: 15px;
+      stroke: var(--text-dim);
+    }
+
+    .chevron {
+      width: 14px;
+      height: 14px;
+      stroke: var(--text-dim);
+      fill: none;
+      stroke-width: 2.2;
+      stroke-linecap: round;
+      stroke-linejoin: round;
+      transition: transform 0.2s cubic-bezier(0.4, 0, 0.2, 1);
+    }
+
+    .cdz-detail-block[open] .chevron {
+      transform: rotate(180deg);
+    }
+
+    .cdz-detail-content {
+      padding: 12px 14px 14px;
+      border-top: 1px solid var(--collapse-border);
+      font-size: 14.5px;
+      color: var(--text);
+      line-height: 1.6;
+      white-space: pre-wrap;
+      word-break: break-word;
+    }
+
+    /* FOOTER */
+    .page-footer {
+      margin-top: 24px;
+      text-align: center;
+      font-size: 12px;
+      color: var(--text-dim);
+      font-family: 'JetBrains Mono', monospace;
+    }
+  </style>
+</head>
+<body>
+
+  <header class="header">
+    <div class="header-top">
+      <span class="app-title">МЭШ · ЦИФРОВОЕ ДОМАШНЕЕ ЗАДАНИЕ</span>
+      <span class="header-counter">{{tasks_count}} заданий</span>
+    </div>
+    <h1 class="header-subject">{{subject_name}}</h1>
+    <div class="header-material">{{material_title}}</div>
+    <div class="meta-bar">
+      <span class="badge-tag">Дата: {{date_title}}</span>
+      <span class="badge-tag">ID: {{homework_id}}</span>
+      <span class="badge-status {{status_class}}">{{status_badge}}</span>
+    </div>
+  </header>
+
+  <div class="action-bar">
+    <button class="btn-tool" onclick="expandAll()">
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor"><polyline points="7 13 12 18 17 13"></polyline><polyline points="7 6 12 11 17 6"></polyline></svg>
+      Развернуть всё
+    </button>
+    <button class="btn-tool" onclick="collapseAll()">
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor"><polyline points="17 11 12 6 7 11"></polyline><polyline points="17 18 12 13 7 18"></polyline></svg>
+      Свернуть всё
+    </button>
+    <button class="btn-tool" onclick="copyAllAnswers()">
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor"><rect x="9" y="9" width="13" height="13" rx="2" ry="2"></rect><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"></path></svg>
+      Скопировать все ответы
+    </button>
+  </div>
+
+  <main class="tasks-list">
+{{#tasks}}
+  </main>
+
+  <footer class="page-footer">
+    Сформировано автоматическим решателем МЭШ · {{generated_time}}
+  </footer>
+
+  <script>
+    function expandAll() {
+      document.querySelectorAll('.cdz-detail-block').forEach(el => el.setAttribute('open', ''));
+    }
+
+    function collapseAll() {
+      document.querySelectorAll('.cdz-detail-block').forEach(el => el.removeAttribute('open'));
+    }
+
+    function copyText(elementId, btn) {
+      const el = document.getElementById(elementId);
+      if (!el) return;
+      const text = el.innerText || el.textContent;
+      navigator.clipboard.writeText(text).then(() => {
+        const orig = btn.innerText;
+        btn.innerText = 'Скопировано!';
+        setTimeout(() => { btn.innerText = orig; }, 1800);
+      });
+    }
+
+    function copyAllAnswers() {
+      const cards = document.querySelectorAll('.task-card');
+      let out = '';
+      cards.forEach((c, idx) => {
+        const titleEl = c.querySelector('.task-number');
+        const ansEl = c.querySelector('.answer-value');
+        const title = titleEl ? titleEl.innerText : `Задание ${idx + 1}`;
+        const ans = ansEl ? (ansEl.innerText || ansEl.textContent).trim() : '';
+        out += `${title}: ${ans}\n`;
+      });
+      navigator.clipboard.writeText(out.trim()).then(() => {
+        alert('Все ответы скопированы в буфер обмена!');
+      });
+    }
+  </script>
+</body>
+</html>

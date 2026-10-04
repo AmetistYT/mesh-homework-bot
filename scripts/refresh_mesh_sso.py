@@ -71,14 +71,30 @@ def run_sso_refresh():
 
     conn = sqlite3.connect(db_path)
     c = conn.cursor()
-    c.execute("SELECT value FROM settings WHERE key='mesh_cookies_json'")
-    row_json = c.fetchone()
-    cookies_json_str = row_json[0] if row_json else None
+    c.execute("SELECT value FROM settings WHERE key='mesh_token'")
+    row_tok = c.fetchone()
+    stored_token = row_tok[0] if row_tok else None
 
     c.execute("SELECT value FROM settings WHERE key='mesh_refresh_token'")
     row_rt = c.fetchone()
     stored_refresh_token = row_rt[0] if row_rt else None
+
+    c.execute("SELECT value FROM settings WHERE key='mesh_cookies_json'")
+    row_json = c.fetchone()
+    cookies_json_str = row_json[0] if row_json else None
+
+    c.execute("SELECT value FROM settings WHERE key='mesh_cookies'")
+    row_legacy = c.fetchone()
+    cookies_legacy_str = row_legacy[0] if row_legacy else None
     conn.close()
+
+    if "--force" not in sys.argv and stored_token and is_jwt_valid(stored_token, margin_seconds=600):
+        return {
+            "status": "ok",
+            "token": stored_token,
+            "refresh_token": stored_refresh_token,
+            "exp": get_jwt_exp(stored_token)
+        }
 
     s = requests.Session()
     s.headers.update({
@@ -108,14 +124,18 @@ def run_sso_refresh():
         return {"status": "error", "message": "No cookies or refresh token found in database settings"}
 
     try:
-        import re
-        r1 = s.get("https://school.mos.ru/v3/auth/sudir/login", allow_redirects=True, timeout=15)
-        m = re.search(r'url=([^"\' >]+)', r1.text, re.IGNORECASE)
-        if m:
-            next_url = m.group(1).replace("&amp;", "&")
-            if not next_url.startswith("http"):
-                next_url = "https://login.mos.ru" + next_url
-            r2 = s.get(next_url, allow_redirects=True, timeout=15)
+        try:
+            import re
+            r1 = s.get("https://school.mos.ru/v3/auth/sudir/login", allow_redirects=True, timeout=15)
+            m = re.search(r'url=([^"\' >]+)', r1.text, re.IGNORECASE)
+            if m:
+                next_url = m.group(1).replace("&amp;", "&")
+                if not next_url.startswith("http"):
+                    next_url = "https://login.mos.ru" + next_url
+                r2 = s.get(next_url, allow_redirects=True, timeout=15)
+        except Exception:
+            # СУДИР SSO redirect может временно сбоить, сохраняем возможность обновиться через /v3/token/refresh
+            pass
 
         new_token = None
         new_refresh = None

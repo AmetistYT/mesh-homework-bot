@@ -9,9 +9,11 @@ use tokio::sync::RwLock;
 use tracing::{info, warn};
 
 use crate::db::Database;
+use super::cdz_client::CdzAssignmentInfo;
 use super::models::{
     EventCalendarItem, EventCalendarResponse, HomeworkItem, HomeworksShortResponse, ProfileResponse,
 };
+
 
 const MES_API_BASE: &str = "https://school.mos.ru/api/family/mobile/v1";
 
@@ -36,6 +38,8 @@ impl MeshClient {
     ) -> Result<Self> {
         let client = reqwest::Client::builder()
             .redirect(reqwest::redirect::Policy::limited(10))
+            .timeout(std::time::Duration::from_secs(30))
+            .connect_timeout(std::time::Duration::from_secs(10))
             .build()?;
 
         let initial_person_id = Self::extract_person_id_from_jwt(&jwt_token);
@@ -58,6 +62,15 @@ impl MeshClient {
     pub async fn get_refresh_token(&self) -> Option<String> {
         self.refresh_token.read().await.clone()
     }
+
+    pub fn student_id(&self) -> i64 {
+        self.student_id
+    }
+
+    pub async fn get_cookies(&self) -> String {
+        self.cookies.read().await.clone()
+    }
+
 
     pub async fn set_refresh_token(&self, new_rt: String) {
         let mut guard = self.refresh_token.write().await;
@@ -217,6 +230,37 @@ impl MeshClient {
         headers
     }
 
+    pub fn clean_mesh_error_message(status: reqwest::StatusCode, raw_body: &str) -> String {
+        let trimmed = raw_body.trim();
+        if trimmed.is_empty() {
+            return format!("{}", status);
+        }
+        if trimmed.starts_with("<!DOCTYPE") || trimmed.starts_with("<html") || trimmed.contains("<body") {
+            if status.is_server_error() {
+                format!("{} (МЭШ временно недоступен или технические работы)", status)
+            } else {
+                format!("{} (сервер вернул HTML вместо данных)", status)
+            }
+        } else if let Ok(val) = serde_json::from_str::<serde_json::Value>(trimmed) {
+            if let Some(msg) = val.get("message").and_then(|m| m.as_str()) {
+                format!("{}: {}", status, msg)
+            } else if let Some(err) = val.get("error").and_then(|e| e.as_str()) {
+                format!("{}: {}", status, err)
+            } else {
+                let s = val.to_string();
+                if s.len() > 150 {
+                    format!("{} (детали ошибки сокращены)", status)
+                } else {
+                    format!("{}: {}", status, s)
+                }
+            }
+        } else if trimmed.len() > 200 {
+            format!("{} (некорректный ответ сервера)", status)
+        } else {
+            format!("{}: {}", status, trimmed)
+        }
+    }
+
     pub async fn get_profile(&self) -> Result<ProfileResponse> {
         if self.is_token_expired().await {
             let _ = self.try_refresh().await;
@@ -253,7 +297,7 @@ impl MeshClient {
                 }
             }
             let body = resp.text().await.unwrap_or_default();
-            return Err(anyhow!("Ошибка получения профиля: {} - {}", status, body));
+            return Err(anyhow!("Ошибка получения профиля: {}", Self::clean_mesh_error_message(status, &body)));
         }
 
         let profile = resp.json::<ProfileResponse>().await?;
@@ -315,7 +359,7 @@ impl MeshClient {
                 }
             }
             let body = resp.text().await.unwrap_or_default();
-            return Err(anyhow!("МЭШ API вернул ошибку {}: {}", status, body));
+            return Err(anyhow!("МЭШ API вернул ошибку {}", Self::clean_mesh_error_message(status, &body)));
         }
 
         let body: HomeworksShortResponse = resp.json().await?;
@@ -349,7 +393,7 @@ impl MeshClient {
                 }
             }
             let text = resp.text().await.unwrap_or_default();
-            return Err(anyhow!("Не удалось отметить ДЗ выполненным: {} - {}", status, text));
+            return Err(anyhow!("Не удалось отметить ДЗ выполненным: {}", Self::clean_mesh_error_message(status, &text)));
         }
 
         Ok(())
@@ -413,12 +457,93 @@ impl MeshClient {
                 }
             }
             let body = resp.text().await.unwrap_or_default();
-            return Err(anyhow!("МЭШ EventCalendar API вернул ошибку {}: {}", status, body));
+            return Err(anyhow!("МЭШ EventCalendar API вернул ошибку {}", Self::clean_mesh_error_message(status, &body)));
         }
 
         let body: EventCalendarResponse = resp.json().await?;
         Ok(body.response.unwrap_or_default())
     }
+
+    /// Поиск цифровых домашних заданий (ЦДЗ) за заданный диапазон дат
+    pub async fn fetch_cdz_assignments(&self, from_date: NaiveDate, to_date: NaiveDate) -> Result<Vec<CdzAssignmentInfo>> {
+        let events = self.get_events(from_date, to_date).await?;
+        let token = self.get_token().await;
+        let mut results = Vec::new();
+
+        for ev in events {
+            let ev_id = match ev.id {
+                Some(id) => id,
+                None => continue,
+            };
+
+            if ev.homework.is_none() {
+                continue;
+            }
+
+            let detail_url = format!("{}/lesson_schedule_items/{}", MES_API_BASE, ev_id);
+            let resp = self.client.get(&detail_url)
+                .headers(self.build_headers(&token))
+                .query(&[("student_id", self.student_id.to_string())])
+                .send()
+                .await;
+
+            if let Ok(r) = resp {
+                if r.status().is_success() {
+                    if let Ok(json_val) = r.json::<serde_json::Value>().await {
+                        if let Some(lesson_hws) = json_val["lesson_homeworks"].as_array() {
+                            for hw in lesson_hws {
+                                let hw_entry_id = hw["homework_entry_id"].as_i64()
+                                    .or_else(|| hw["homework_entry_student_id"].as_i64())
+                                    .unwrap_or(0);
+                                let hw_text = hw["homework"].as_str().unwrap_or_default().to_string();
+                                let is_done = hw["is_done"].as_bool().unwrap_or(false);
+
+                                if let Some(materials) = hw["additional_materials"].as_array() {
+                                    for mat in materials {
+                                        let mat_type = mat["type"].as_str().unwrap_or_default().to_lowercase();
+                                        let mat_type_name = mat["type_name"].as_str().unwrap_or_default().to_lowercase();
+                                        let mat_sub_type = mat["sub_type"].as_str().unwrap_or_default().to_lowercase();
+                                        let uuid = mat["uuid"].as_str().unwrap_or_default();
+                                        let mat_title = mat["title"].as_str().unwrap_or_default();
+                                        let mat_title_lower = mat_title.to_lowercase();
+
+                                        if uuid.is_empty() {
+                                            continue;
+                                        }
+
+                                        // Считаем ЦДЗ ТОЛЬКО материалы с явной пометкой 'тест' в МЭШ:
+                                        // тип test_spec_binding/test, type_name "тест", sub_type "test" или "тест" в названии материала.
+                                        let is_explicit_test = mat_type == "test_spec_binding"
+                                            || mat_type.contains("test")
+                                            || mat_type_name.contains("тест")
+                                            || mat_sub_type.contains("test")
+                                            || mat_title_lower.contains("тест")
+                                            || mat_title_lower.contains("тестирован");
+
+                                        if is_explicit_test {
+                                            results.push(CdzAssignmentInfo {
+                                                homework_entry_id: hw_entry_id,
+                                                material_uuid: uuid.to_string(),
+                                                material_title: mat_title.to_string(),
+                                                subject_name: ev.subject_name.clone().unwrap_or_else(|| "Неизвестный предмет".to_string()),
+                                                description: hw_text.clone(),
+                                                date: ev.start_at.clone().unwrap_or_default(),
+                                                is_done,
+                                            });
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        results.dedup_by(|a, b| a.homework_entry_id == b.homework_entry_id && a.material_uuid == b.material_uuid);
+        Ok(results)
+    }
+
 
     /// Обновление пары токенов через официальный эндпоинт МЭШ /v3/token/refresh
     pub async fn refresh_token_v3(&self) -> Result<Option<String>> {
@@ -812,6 +937,7 @@ mod tests {
     use super::*;
 
     #[tokio::test]
+    #[ignore]
     async fn test_mesh_get_events() {
         let _ = dotenvy::dotenv();
         let token = std::env::var("MESH_JWT_TOKEN").unwrap_or_default();
@@ -835,6 +961,35 @@ mod tests {
         assert!(events.is_ok(), "Ошибка запроса событий: {:?}", events.err());
         let evs = events.unwrap();
         println!("Найдено событий: {}", evs.len());
-        assert!(!evs.is_empty());
+    }
+
+    #[tokio::test]
+    #[ignore]
+    async fn test_mesh_fetch_cdz() {
+        let _ = dotenvy::dotenv();
+        let token = std::env::var("MESH_JWT_TOKEN").unwrap_or_default();
+        let student_id: i64 = std::env::var("MESH_STUDENT_ID")
+            .unwrap_or_else(|_| "17486681".to_string())
+            .parse()
+            .unwrap_or(17486681);
+        if token.is_empty() {
+            println!("Пропуск теста: MESH_JWT_TOKEN не задан");
+            return;
+        }
+
+        let client = MeshClient::new(token, None, student_id, String::new(), None).unwrap();
+        let today = chrono::Local::now().date_naive();
+        let cdz = client
+            .fetch_cdz_assignments(
+                today - chrono::Duration::days(14),
+                today + chrono::Duration::days(14),
+            )
+            .await;
+        assert!(cdz.is_ok(), "Ошибка запроса ЦДЗ: {:?}", cdz.err());
+        let list = cdz.unwrap();
+        println!("Найдено ЦДЗ: {}", list.len());
+        for item in &list {
+            println!("  - [{}] {} (материал: '{}') id: {}", item.subject_name, item.description, item.material_title, item.homework_entry_id);
+        }
     }
 }

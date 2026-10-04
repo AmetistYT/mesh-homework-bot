@@ -319,6 +319,12 @@ impl Database {
         Ok(())
     }
 
+    pub fn delete_setting(&self, key: &str) -> Result<()> {
+        let conn = self.conn.lock().unwrap();
+        conn.execute("DELETE FROM settings WHERE key = ?1", params![key])?;
+        Ok(())
+    }
+
     pub fn get_recent_solutions(&self, limit: usize) -> Result<Vec<(String, String, String, String)>> {
         let conn = self.conn.lock().unwrap();
         let mut stmt = conn.prepare(
@@ -666,25 +672,42 @@ impl Database {
     }
 
     /// Получение истории сообщений чата в хронологическом порядке (от старых к новым)
-    /// с ограничением по количеству сообщений и символов (для лимита контекста в 200k токенов)
-    pub fn get_chat_history(
+    /// с фильтрацией по времени и ограничением по количеству сообщений и символов
+    pub fn get_chat_history_since(
         &self,
         chat_id: &str,
         max_messages: usize,
         max_chars: usize,
+        since_ts: Option<i64>,
     ) -> Result<Vec<ChatMessageRecord>> {
         let conn = self.conn.lock().unwrap();
-        let mut stmt = conn.prepare(
+        let query = if since_ts.is_some() {
+            "SELECT id, chat_id, message_id, user_id, username, full_name, text,
+                    reply_to_message_id, reply_to_user_id, reply_to_text, timestamp, created_at
+             FROM chat_messages
+             WHERE chat_id = ?1 AND timestamp > ?3
+             ORDER BY timestamp DESC, id DESC
+             LIMIT ?2"
+        } else {
             "SELECT id, chat_id, message_id, user_id, username, full_name, text,
                     reply_to_message_id, reply_to_user_id, reply_to_text, timestamp, created_at
              FROM chat_messages
              WHERE chat_id = ?1
              ORDER BY timestamp DESC, id DESC
-             LIMIT ?2",
-        )?;
+             LIMIT ?2"
+        };
 
-        let rows = stmt.query_map(params![chat_id, max_messages as i64], |row| {
-            Ok(ChatMessageRecord {
+        let mut stmt = conn.prepare(query)?;
+        let mut rows = if let Some(since) = since_ts {
+            stmt.query(params![chat_id, max_messages as i64, since])?
+        } else {
+            stmt.query(params![chat_id, max_messages as i64])?
+        };
+
+        let mut raw_list = Vec::new();
+        let mut total_chars = 0;
+        while let Some(row) = rows.next()? {
+            let item = ChatMessageRecord {
                 id: row.get(0)?,
                 chat_id: row.get(1)?,
                 message_id: row.get(2)?,
@@ -697,13 +720,7 @@ impl Database {
                 reply_to_text: row.get(9)?,
                 timestamp: row.get(10)?,
                 created_at: row.get(11)?,
-            })
-        })?;
-
-        let mut raw_list = Vec::new();
-        let mut total_chars = 0;
-        for r in rows {
-            let item = r?;
+            };
             total_chars += item.text.len();
             raw_list.push(item);
             if total_chars >= max_chars {
@@ -714,6 +731,16 @@ impl Database {
         // Переворачиваем обратно в хронологический порядок: от старых к новым
         raw_list.reverse();
         Ok(raw_list)
+    }
+
+    /// Получение недавней истории сообщений чата в хронологическом порядке (от старых к новым)
+    pub fn get_chat_history(
+        &self,
+        chat_id: &str,
+        max_messages: usize,
+        max_chars: usize,
+    ) -> Result<Vec<ChatMessageRecord>> {
+        self.get_chat_history_since(chat_id, max_messages, max_chars, None)
     }
 
     /// Получение контекста для разбора спора (последние сообщения чата)
@@ -759,6 +786,21 @@ mod tests {
         let history_updated = db.get_chat_history("-1001", 10, 10000).expect("get_chat_history after edit");
         assert_eq!(history_updated.len(), 3);
         assert_eq!(history_updated[2].text, "Отредактированное третье сообщение");
+
+        // Проверка фильтрации истории с момента очистки (since_ts)
+        let history_since = db.get_chat_history_since("-1001", 10, 10000, Some(105)).expect("get_chat_history_since");
+        assert_eq!(history_since.len(), 2);
+        assert_eq!(history_since[0].message_id, 2);
+        assert_eq!(history_since[1].message_id, 3);
+
+        let history_after_all = db.get_chat_history_since("-1001", 10, 10000, Some(130)).expect("get_chat_history_since after all");
+        assert_eq!(history_after_all.len(), 0);
+
+        // Проверка работы с настройками (set_setting, get_setting, delete_setting)
+        db.set_setting("agy_conv_id_-1001", "test-uuid-1234").expect("set_setting");
+        assert_eq!(db.get_setting("agy_conv_id_-1001").expect("get_setting"), Some("test-uuid-1234".to_string()));
+        db.delete_setting("agy_conv_id_-1001").expect("delete_setting");
+        assert_eq!(db.get_setting("agy_conv_id_-1001").expect("get_setting after delete"), None);
 
         // Проверка разбора спора
         let dispute_ctx = db.get_recent_dispute_context("-1001", 5).expect("get dispute context");

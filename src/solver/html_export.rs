@@ -120,14 +120,14 @@ impl HtmlExporter {
     }
 }
 
-fn html_escape(text: &str) -> String {
+pub fn html_escape(text: &str) -> String {
     text.replace('&', "&amp;")
         .replace('<', "&lt;")
         .replace('>', "&gt;")
         .replace('"', "&quot;")
 }
 
-fn markdown_to_html(md: &str) -> String {
+pub fn markdown_to_html(md: &str) -> String {
     let cleaned = crate::solver::latex::clean_latex(md);
     let mut html = String::new();
     let mut in_table = false;
